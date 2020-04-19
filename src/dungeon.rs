@@ -1,7 +1,7 @@
 use std::cmp::{max, Ordering};
 
 use rand::{Rng, thread_rng};
-use rand::distributions::{Distribution, Uniform};
+use rand::distributions::{Distribution, Uniform, WeightedIndex};
 
 pub trait DungeonGenerator {
     fn generate(&self, bounds: &Rect) -> Vec<Rect>;
@@ -9,7 +9,7 @@ pub trait DungeonGenerator {
 
 pub struct Corners<T>(pub (T, T), pub (T, T));
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Rect {
     x_min: i32,
     x_max: i32,
@@ -33,8 +33,6 @@ impl Rect {
     pub fn height(&self) -> i32 { self.y_max - self.y_min }
     pub fn lower_left(&self) -> (i32, i32) { (self.x_min, self.y_min) }
     pub fn upper_right(&self) -> (i32, i32) { (self.x_max, self.y_max) }
-
-    #[allow(unused)]
     pub fn area(&self) -> i32 { self.width() * self.height() }
     // pub fn intersects(&self, that: &RectU32)
 
@@ -248,14 +246,62 @@ pub struct SliceAwayGenerator;
 impl DungeonGenerator for SliceAwayGenerator {
     fn generate(&self, bounds: &Rect) -> Vec<Rect> {
         let mut rng = thread_rng();
-        let x_range = Uniform::new(bounds.x_min, bounds.x_max);
-        let y_range = Uniform::new(bounds.y_min, bounds.y_max);
-        let hole = Corners(
-            (x_range.sample(&mut rng), y_range.sample(&mut rng)),
-            (x_range.sample(&mut rng), y_range.sample(&mut rng)),
-        ).into();
-        println!("Hole: {:?}", hole);
+        let tile_size = 50;
 
-        bounds.slice_away(&hole).random_stitch(&mut rng)
+        let point_pixel_to_tile = |pixel_pos: (i32, i32)| { (pixel_pos.0 / tile_size, pixel_pos.1 / tile_size) };
+        let point_tile_to_pixel = |tile_pos: (i32, i32)| { (tile_pos.0 * tile_size, tile_pos.1 * tile_size) };
+        let rect_pixel_to_tile = |rect: &Rect| { Rect::from(Corners(point_pixel_to_tile(rect.upper_right()), point_pixel_to_tile(rect.lower_left()))) };
+        let rect_tile_to_pixel = |rect: &Rect| { Rect::from(Corners(point_tile_to_pixel(rect.upper_right()), point_tile_to_pixel(rect.lower_left()))) };
+
+        let tile_bounds = rect_pixel_to_tile(bounds);
+
+        let mut out = Vec::new();
+        slice_away_split(&mut rng, &tile_bounds, 20, &mut out);
+
+        out.iter().map(rect_tile_to_pixel).collect()
+    }
+}
+/// ((width, height), probability_weight)
+fn room_tile_sizes() -> Vec<((i32, i32), u32)> {
+    vec![
+        ((3, 4), 6),
+        ((3, 3), 8),
+        ((3, 2), 10),
+        ((2, 2), 10),
+        ((2, 1), 2),
+        ((1, 1), 1)
+    ]
+}
+fn slice_away_split<R: Rng>(rng: &mut R, bounds: &Rect, remaining_depth: u32, out: &mut Vec<Rect>) {
+    if remaining_depth == 0 || bounds.area() <= 1 {
+        out.push(*bounds);
+    } else {
+        let (possible_rooms, weights): (Vec<(i32, i32)>, Vec<u32>) = room_tile_sizes().iter()
+            .flat_map(|((w, h), i)| { vec![((*w, *h), *i), ((*h, *w), *i)] })
+            .filter(|((width, height), _)| {  *width <= bounds.width() && *height <= bounds.height() })
+            .unzip();
+
+        match WeightedIndex::new(weights) {
+            Err(_) => {
+                out.push(*bounds);
+            },
+            Ok(dist) => {
+                // pick a random room size
+                let (room_w, room_h) = possible_rooms[dist.sample(rng)];
+                // pick a random position for the room within the bounds (the +1 is to make the range inclusive)
+                let room_x = rng.gen_range(bounds.x_min(), bounds.x_max() - room_w + 1);
+                let room_y = rng.gen_range(bounds.y_min(), bounds.y_max() - room_h + 1);
+
+                let room = Rect::from_xywh(room_x, room_y, room_w, room_h);
+
+                // cut the room out of the `bounds`, and parition out the remaining Rects
+                bounds.slice_away(&room).random_stitch(rng).iter().for_each(|r| {
+                    slice_away_split(rng, r, remaining_depth - 1, out);
+                });
+
+                // don't split the room; it's just the way we want it
+                out.push(room);
+            },
+        };
     }
 }
