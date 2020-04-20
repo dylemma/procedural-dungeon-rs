@@ -12,6 +12,7 @@ use crow::{
 
 #[allow(unused)]
 use crate::dungeon::{Rect, DungeonGenerator, NaiveRandomDungeon, Corners, SliceAwayGenerator};
+use crate::dungeon::RandomRoomGridGenerator;
 
 
 fn main() -> Result<(), crow::Error> {
@@ -19,7 +20,8 @@ fn main() -> Result<(), crow::Error> {
     let mut ctx = Context::new(WindowBuilder::new(), &event_loop)?;
 
     // let generator = Box::new(NaiveRandomDungeon{ count: 20 });
-    let generator = Box::new(SliceAwayGenerator);
+    // let generator = Box::new(SliceAwayGenerator);
+    let generator = Box::new(RandomRoomGridGenerator::new(24));
 
     let mut world = World::new(generator);
 
