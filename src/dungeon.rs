@@ -1,13 +1,38 @@
 use std::cmp::{max, Ordering};
 
+use std::num::NonZeroUsize;
 use rand::{Rng, thread_rng};
-use rand::distributions::{Distribution, Uniform, WeightedIndex};
+use rand::distributions::{Distribution, WeightedIndex};
 use std::collections::HashMap;
 use std::iter::Iterator;
 use std::fmt::Debug;
+use crate::tile::{WallType, GridTiles, GridWalls, TileAddress};
 
-pub trait DungeonGenerator {
-    fn generate(&self, bounds: &Rect) -> Vec<Rect>;
+pub struct GridDungeon<R, W = WallType> {
+    grid_width: usize,
+    grid_height: usize,
+    tiles: GridTiles<R>,
+    walls: GridWalls<W>,
+}
+impl <R, W> GridDungeon<R, W>
+where
+    R: Default + Clone,
+    W: Default + Clone,
+{
+    fn new(grid_width: usize, grid_height: usize) -> Self {
+        GridDungeon {
+            grid_width,
+            grid_height,
+            tiles: GridTiles::new(grid_width, grid_height),
+            walls: GridWalls::new(grid_width, grid_height),
+        }
+    }
+}
+impl <R, W> GridDungeon<R, W> {
+    pub fn grid_width(&self) -> usize { self.grid_width }
+    pub fn grid_height(&self) -> usize { self.grid_height }
+    pub fn tiles(&self) -> &GridTiles<R> { &self.tiles }
+    pub fn walls(&self) -> &GridWalls<W> { &self.walls }
 }
 
 pub struct Corners<T>(pub (T, T), pub (T, T));
@@ -220,249 +245,157 @@ fn arrange<T: Ord>(a: T, b: T) -> (T, T) {
     }
 }
 
-// ---------------------------------------------------------------------------
+// =============================================
 
-pub struct NaiveRandomDungeon {
-    pub count: u32,
-}
-impl DungeonGenerator for NaiveRandomDungeon {
-    fn generate(&self, bounds: &Rect) -> Vec<Rect> {
-        let width_range = Uniform::new(10, max(10, bounds.width() / 3));
-        let height_range = Uniform::new(10, max(10, bounds.height() / 3));
-        let mut rng = thread_rng();
+#[derive(Copy, Clone, Debug)]
+pub struct RoomSize(NonZeroUsize, NonZeroUsize);
+impl RoomSize {
+    pub fn new(x: usize, y: usize) -> Option<RoomSize> {
+        NonZeroUsize::new(x).and_then(move |xx| {
+            NonZeroUsize::new(y).map(|yy| {
+                RoomSize(xx, yy)
+            })
+        })
+    }
 
-        let mut v = Vec::new();
-
-        for _ in 1..self.count {
-            let width = width_range.sample(&mut rng);
-            let height = height_range.sample(&mut rng);
-            let x = rng.gen_range(bounds.x_min(), bounds.x_max() - width);
-            let y = rng.gen_range(bounds.y_min(), bounds.y_max() - height);
-            v.push(Rect::from_xywh(x, y, width, height));
+    pub fn width(&self) -> usize { self.0.get() }
+    pub fn height(&self) -> usize { self.1.get() }
+    pub fn permutations(&self) -> Vec<RoomSize> {
+        if self.0 == self.1 {
+            vec!(*self)
+        } else {
+            vec!(*self, RoomSize(self.1, self.0))
         }
-
-        v
     }
 }
 
-trait TileScale {
-    fn pixel_to_tile(&self, grid_size: i32) -> Self;
-    fn tile_to_pixel(&self, grid_size: i32) -> Self;
-}
-impl TileScale for (i32, i32) {
-    fn pixel_to_tile(&self, grid_size: i32) -> Self {
-        (self.0 / grid_size, self.1 / grid_size)
-    }
-    fn tile_to_pixel(&self, grid_size: i32) -> Self {
-        (self.0 * grid_size, self.1 * grid_size)
-    }
-}
-impl TileScale for Rect {
-    fn pixel_to_tile(&self, grid_size: i32) -> Self {
-        Rect::from(Corners(
-            self.lower_left().pixel_to_tile(grid_size),
-            self.upper_right().pixel_to_tile(grid_size),
-        ))
-    }
-    fn tile_to_pixel(&self, grid_size: i32) -> Self {
-        Rect::from(Corners(
-            self.lower_left().tile_to_pixel(grid_size),
-            self.upper_right().tile_to_pixel(grid_size),
-        ))
-    }
-}
-
-pub struct SliceAwayGenerator;
-impl DungeonGenerator for SliceAwayGenerator {
-    fn generate(&self, bounds: &Rect) -> Vec<Rect> {
-        let mut rng = thread_rng();
-        let tile_size = 25;
-
-        let tile_bounds = bounds.pixel_to_tile(tile_size);
-
-        let mut out = Vec::new();
-        slice_away_split(&mut rng, &tile_bounds, 20, &mut out);
-
-        out.iter().map(|r| r.tile_to_pixel(tile_size)).collect()
-    }
-}
-
-type RoomSize = (i32, i32);
-
-/// ((width, height), probability_weight)
-fn room_tile_sizes() -> Vec<(RoomSize, u32)> {
-    vec![
-        ((5, 4), 1),
-        ((4, 4), 2),
-        ((4, 2), 4),
-        ((3, 4), 6),
-        ((3, 3), 8),
-        ((3, 2), 10),
-        ((3, 1), 2),
-        ((2, 2), 10),
-        ((2, 1), 2),
-        ((1, 1), 1)
-    ]
-}
-fn slice_away_split<R: Rng>(rng: &mut R, bounds: &Rect, remaining_depth: u32, out: &mut Vec<Rect>) {
-    if remaining_depth == 0 || bounds.area() <= 1 {
-        out.push(*bounds);
-    } else {
-        let (possible_rooms, weights): (Vec<(i32, i32)>, Vec<u32>) = room_tile_sizes().iter()
-            .flat_map(|((w, h), i)| { vec![((*w, *h), *i), ((*h, *w), *i)] })
-            .filter(|((width, height), _)| {  *width <= bounds.width() && *height <= bounds.height() })
-            .unzip();
-
-        match WeightedIndex::new(weights) {
-            Err(_) => {
-                out.push(*bounds);
-            },
-            Ok(dist) => {
-                // pick a random room size
-                let (room_w, room_h) = possible_rooms[dist.sample(rng)];
-                // pick a random position for the room within the bounds (the +1 is to make the range inclusive)
-                let room_x = rng.gen_range(bounds.x_min(), bounds.x_max() - room_w + 1);
-                let room_y = rng.gen_range(bounds.y_min(), bounds.y_max() - room_h + 1);
-
-                let room = Rect::from_xywh(room_x, room_y, room_w, room_h);
-
-                // cut the room out of the `bounds`, and parition out the remaining Rects
-                bounds.slice_away(&room).random_stitch(rng).iter().for_each(|r| {
-                    slice_away_split(rng, r, remaining_depth - 1, out);
-                });
-
-                // don't split the room; it's just the way we want it
-                out.push(room);
-            },
-        };
-    }
-}
-
-
-pub struct RandomRoomGridGenerator {
-    tile_size: i32,
-}
-impl RandomRoomGridGenerator {
-    pub fn new(tile_size: i32) -> Self {
-        RandomRoomGridGenerator { tile_size }
-    }
-}
-impl DungeonGenerator for RandomRoomGridGenerator {
-    fn generate(&self, bounds: &Rect) -> Vec<Rect> {
-        let grid_width = bounds.width() / self.tile_size;
-        let grid_height = bounds.height() / self.tile_size;
-
-        let room_weights = room_tile_sizes().iter()
-            .flat_map(|((w, h), i)| { vec![((*w, *h), *i), ((*h, *w), *i)] })
-            .collect();
-            // .filter(|((width, height), _)| {  *width <= bounds.width() && *height <= bounds.height() })
-            // .unzip();
-
-        // let rooms: Vec<Rect> = room_tile_sizes().iter()
-        //     .map(|(room_size, _)| *room_size)
-        //     .flat_map(|(w,h)| vec![(w,h), (h,w)])
-        //     .map(|(w,h)| Rect::from_xywh(0, 0, w, h))
-        //     .collect();
-
-        let mut grid = RoomGrid::new(grid_width, grid_height);
-        let mut out = Vec::new();
-        // for _ in 0..100 {
-            while let Some(room) = grid.try_place_room(&room_weights) {
-                out.push(room.tile_to_pixel(self.tile_size));
+fn can_fit_room <F>(
+    room: &RoomSize,
+    anchor: &TileAddress,
+    is_unoccupied: F
+) -> bool
+where
+    F: Fn(&TileAddress) -> bool
+{
+    for x in anchor.x..(anchor.x + room.width()) {
+        for y in anchor.y..(anchor.y + room.height()) {
+            if !is_unoccupied(&TileAddress { x, y }) {
+                return false
             }
-        // }
-        out
+        }
+    }
+    true
+}
+
+pub trait GridDungeonGenerator<R, W = WallType> {
+    fn generate(&mut self, grid_width: usize, grid_height: usize) -> GridDungeon<R, W>;
+}
+
+
+
+#[derive(Copy, Clone, Hash, Eq, PartialEq)]
+pub struct RoomId(usize);
+
+pub struct RandomRoomGridDungeonGenerator {
+    room_chances: Vec<(RoomSize, usize)>
+}
+impl RandomRoomGridDungeonGenerator {
+    pub fn new(room_chances: Vec<(RoomSize, usize)>) -> Self {
+        RandomRoomGridDungeonGenerator {
+            room_chances
+        }
     }
 }
 
-type Tile = (i32, i32);
-
-struct RoomGrid {
-    unassigned_tiles: Vec<Tile>,
-    tile_states: HashMap<Tile, bool>,
-}
-impl RoomGrid {
-    pub fn new(grid_width: i32, grid_height: i32) -> Self {
-        let unassigned_tiles: Vec<Tile> = (0..grid_width).flat_map(|x| (0..grid_height).map(move |y| (x, y))).collect();
-        let mut tile_states: HashMap<Tile, bool> = HashMap::new();
-        for tile in unassigned_tiles.iter() {
-            tile_states.insert(*tile, false);
-        }
-        RoomGrid {
-            unassigned_tiles,
-            tile_states
-        }
-    }
-
-    pub fn try_place_room(&mut self, room_weights: &Vec<(RoomSize, u32)>) -> Option<Rect> {
-        let mut rng = thread_rng();
-        if self.unassigned_tiles.is_empty() || room_weights.is_empty() {
-            return None
-        }
-        // randomly pick a starting point from the unassigned tiles
-        let start_index = rng.gen_range(0, self.unassigned_tiles.len());
-        let start_tile = self.unassigned_tiles[start_index];
-
-        let can_place_room = |(w, h): RoomSize, (x, y): Tile| {
-            for i in x..(x + w) {
-                for j in y..(y + h) {
-                    if self.is_assigned(&(i, j)) || !self.has_tile(&(i, j)) {
-                        return false
+fn random_room_placement<R, F>(
+    target_tile: &TileAddress,
+    room_chances: &Vec<(RoomSize, usize)>,
+    rng: &mut R,
+    is_unoccupied: F,
+) -> Option<(RoomSize, TileAddress)>
+where
+    R: Rng,
+    F: Fn(&TileAddress) -> bool + Copy
+{
+    let (possible_placements, placement_weights): (Vec<(RoomSize, TileAddress)>, Vec<usize>) = room_chances.iter()
+        .flat_map(|(room, chance)| {
+            let TileAddress { x, y } = *target_tile;
+            (0..room.width()).flat_map(move |dx| {
+                (0..room.height()).flat_map(move |dy| {
+                    if x >= dx && y >= dy {
+                        let addr = TileAddress {
+                            x: x - dx,
+                            y: y - dy,
+                        };
+                        Some(((*room, addr), *chance))
+                    } else {
+                        None
                     }
-                }
-            }
-            return true
-        };
-
-        let valid_weighted_room_placements: Vec<(RoomSize, u32, Tile)> = room_weights.iter()
-            .flat_map(|(room, chance)| {
-                (0..room.0).flat_map(move |dx| {
-                    (0..room.1).map(move |dy| {
-                        (*room, *chance, (start_tile.0 - dx, start_tile.1 - dy))
-                    })
                 })
             })
-            .filter(|(room, _chance, tile)| {
-                can_place_room(*room, *tile)
-            })
-            .collect();
+        })
+        .filter(|((room, target_tile), _)| {
+            can_fit_room(room, target_tile, is_unoccupied)
+        })
+        .unzip();
 
-        if valid_weighted_room_placements.is_empty() {
-            return None
-        }
+    if possible_placements.is_empty() {
+        None
+    } else {
+        // select one of the possible room placements
+        let dist = WeightedIndex::new(&placement_weights).expect("assumed valid weights");
+        Some(possible_placements[dist.sample(rng)])
+    }
+}
 
-        let (valid_room_placements, valid_room_weights): (Vec<(RoomSize, Tile)>, Vec<u32>) = valid_weighted_room_placements.iter()
-            .map(|(size, chance, pos)| ((*size, *pos), *chance))
-            .unzip();
-        let dist = WeightedIndex::new(&valid_room_weights).expect("assumed valid weights");
-        let ((room_w, room_h), (room_x, room_y)) = valid_room_placements[dist.sample(&mut rng)];
-        // let (room, room_x, room_y) = valid_weighted_room_placements[rng.gen_range(0, valid_weighted_room_placements.len())];
+impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenerator {
+    fn generate(&mut self, grid_width: usize, grid_height: usize) -> GridDungeon<Option<(RoomId, f32)>, WallType> {
+        let mut dungeon: GridDungeon<Option<(RoomId, f32)>, WallType> = GridDungeon::new(grid_width, grid_height);
+        let mut rng = thread_rng();
+        let mut next_room_id: usize = 0;
+        let mut unassigned_tiles: Vec<TileAddress> = dungeon.tiles().tile_addresses().collect();
 
-        // remove all tiles associated with the room and its placement from the `unassigned_tiles` vec
-        self.unassigned_tiles.retain(|&(x, y)| {
-            x < room_x ||
-                y < room_y ||
-                x >= room_x + room_w ||
-                y >= room_y + room_h
-        });
-        // mark all tiles associated with the room and its placement as 'assigned'
-        for x in room_x..(room_x + room_w) {
-            for y in room_y..(room_y + room_h) {
-                self.tile_states.insert((x, y), true);
+        while !unassigned_tiles.is_empty() {
+
+            let target_tile = unassigned_tiles[rng.gen_range(0, unassigned_tiles.len())];
+            let maybe_placed = random_room_placement(
+                &target_tile,
+                &self.room_chances,
+                &mut rng,
+                |addr| {
+                    let tiles = dungeon.tiles();
+                    tiles.has_tile(addr) && tiles[*addr].is_none()
+                }
+            );
+
+            if let Some((room_size, room_origin)) = maybe_placed {
+                let room_w = room_size.width();
+                let room_h = room_size.height();
+                let TileAddress { x: room_x, y: room_y } = room_origin;
+
+                // assign tiles on the grid
+                let room_id = RoomId(next_room_id);
+                next_room_id += 1;
+                let room_weight: f32 = rng.gen();
+                for x in room_x..(room_x + room_w) {
+                    for y in room_y..(room_y + room_h) {
+                        let addr = TileAddress { x, y };
+                        dungeon.tiles[addr] = Some((room_id, room_weight));
+                    }
+                }
+
+                // remove all of the newly-assigned tiles from the 'unassigned' list
+                unassigned_tiles.retain(|&TileAddress { x, y }| {
+                    x < room_x ||
+                        y < room_y ||
+                        x >= room_x + room_w ||
+                        y >= room_y + room_h
+                })
+            } else {
+                break;
             }
         }
 
-        let placed_room = Rect::from_xywh(room_x, room_y, room_w, room_h);
-        Some(placed_room)
-    }
-
-    fn is_assigned(&self, tile: &(i32, i32)) -> bool {
-        match self.tile_states.get(tile) {
-            None => false,
-            Some(assigned) => *assigned,
-        }
-    }
-    fn has_tile(&self, tile: &(i32, i32)) -> bool {
-        self.tile_states.get(tile).is_some()
+        dungeon
     }
 }
