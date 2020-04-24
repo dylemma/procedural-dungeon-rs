@@ -1,16 +1,17 @@
-use crow::{Context, DrawConfig, glutin::{
-    event::{Event, StartCause, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
-}, image::{ImageBuffer, Rgba, RgbaImage}, Texture};
+use crow::{Context, DrawConfig, Texture};
+use crow::glutin::event::{Event, StartCause, WindowEvent};
+use crow::glutin::event_loop::{ControlFlow, EventLoop};
+use crow::glutin::window::WindowBuilder;
+use crow::image::{ImageBuffer, Rgba, RgbaImage};
 use rand::{Rng, thread_rng};
 
 #[allow(unused)]
-use crate::dungeon::{Corners, Rect};
 use crate::dungeon::{GridDungeon, GridDungeonGenerator, RandomRoomGridDungeonGenerator, RoomId, RoomSize};
-use crate::tile::{WallType, TileAddress, CompassDirection};
+use crate::geom::{Corners, Rect};
+use crate::tile::{CompassDirection, TileAddress, WallType};
 
 mod dungeon;
+mod geom;
 mod tile;
 
 fn main() -> Result<(), crow::Error> {

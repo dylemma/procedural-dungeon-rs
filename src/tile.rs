@@ -1,10 +1,10 @@
-use std::convert::TryFrom;
-use std::ops::{Index, IndexMut, Add};
+use std::borrow::{Borrow, BorrowMut};
 use std::cmp::Eq;
-use std::slice::{Iter, IterMut};
+use std::convert::TryFrom;
 use std::iter::Enumerate;
 use std::marker::PhantomData;
-use std::borrow::{BorrowMut, Borrow};
+use std::ops::{Add, Index, IndexMut};
+use std::slice::{Iter, IterMut};
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct TileAddress {
