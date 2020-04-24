@@ -355,6 +355,7 @@ impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenera
         let mut next_room_id: usize = 0;
         let mut unassigned_tiles: Vec<TileAddress> = dungeon.tiles().tile_addresses().collect();
 
+        // fill the grid with rooms
         while !unassigned_tiles.is_empty() {
 
             let target_tile = unassigned_tiles[rng.gen_range(0, unassigned_tiles.len())];
@@ -393,6 +394,22 @@ impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenera
                 })
             } else {
                 break;
+            }
+        }
+
+        for (wall_addr, wall_type) in dungeon.walls.iter_mut() {
+            let tiles = &dungeon.tiles;
+            let this_room = tiles[wall_addr.tile()].map(|(id, _)| id);
+            let neighbor_room = wall_addr.neighbor().and_then(|n| {
+                if tiles.has_tile(&n) {
+                    tiles[n].map(|(id, _)| id)
+                } else {
+                    None
+                }
+            });
+            if this_room != neighbor_room {
+                println!("Wall at {:?}", wall_addr);
+                *wall_type = WallType::Wall;
             }
         }
 

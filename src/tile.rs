@@ -12,7 +12,7 @@ pub struct TileAddress {
     pub y: usize,
 }
 
-#[derive(Copy, Clone, Hash, Eq, PartialEq)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub enum CompassDirection {
     North,
     East,
@@ -21,14 +21,26 @@ pub enum CompassDirection {
 }
 
 impl Add<CompassDirection> for TileAddress {
-    type Output = TileAddress;
+    type Output = Option<TileAddress>;
 
-    fn add(self, rhs: CompassDirection) -> TileAddress {
+    fn add(self, rhs: CompassDirection) -> Option<TileAddress> {
         match rhs {
-            CompassDirection::North => TileAddress { x: self.x, y: self.y + 1 },
-            CompassDirection::East => TileAddress { x: self.x + 1, y: self.y },
-            CompassDirection::South => TileAddress { x: self.x, y: self.y - 1 },
-            CompassDirection::West => TileAddress { x: self.x - 1, y: self.y },
+            CompassDirection::North => Some(TileAddress { x: self.x, y: self.y + 1 }),
+            CompassDirection::East => Some(TileAddress { x: self.x + 1, y: self.y }),
+            CompassDirection::South => {
+                if self.y > 0 {
+                    Some(TileAddress { x: self.x, y: self.y - 1 })
+                } else {
+                    None
+                }
+            },
+            CompassDirection::West => {
+                if self.x > 0 {
+                    Some(TileAddress { x: self.x - 1, y: self.y })
+                } else {
+                    None
+                }
+            },
         }
     }
 }
@@ -45,7 +57,7 @@ impl Default for WallType {
     }
 }
 
-#[derive(Copy, Clone, Hash, Eq, PartialEq)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct WallAddress {
     tile: TileAddress,
     direction: CompassDirection,
@@ -85,9 +97,14 @@ impl WallAddress {
             }
         }
     }
-
-    pub fn neighbor(&self) -> TileAddress {
+    pub fn tile(&self) -> TileAddress {
+        self.tile
+    }
+    pub fn neighbor(&self) -> Option<TileAddress> {
         self.tile + self.direction
+    }
+    pub fn direction(&self) -> CompassDirection {
+        self.direction
     }
 }
 impl From<(TileAddress, CompassDirection)> for WallAddress {
@@ -175,7 +192,7 @@ impl<T: Default + Clone> GridWalls<T> {
     }
 }
 impl<T> GridWalls<T> {
-    fn iter(&self) -> GridWallsIterator<T> {
+    pub fn iter(&self) -> GridWallsIterator<T> {
         GridWallsIterator {
             direction: Some(CompassDirection::North),
             grid_width: self.grid_width,
@@ -187,7 +204,7 @@ impl<T> GridWalls<T> {
             ]
         }
     }
-    fn iter_mut(&mut self) -> GridWallsIteratorMut<T> {
+    pub fn iter_mut(&mut self) -> GridWallsIteratorMut<T> {
         GridWallsIteratorMut {
             direction: Some(CompassDirection::North),
             grid_width: self.grid_width,

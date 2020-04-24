@@ -8,6 +8,7 @@ use rand::{Rng, thread_rng};
 #[allow(unused)]
 use crate::dungeon::{Corners, Rect};
 use crate::dungeon::{GridDungeon, GridDungeonGenerator, RandomRoomGridDungeonGenerator, RoomId, RoomSize};
+use crate::tile::{WallType, TileAddress, CompassDirection};
 
 mod dungeon;
 mod tile;
@@ -49,8 +50,22 @@ fn main() -> Result<(), crow::Error> {
                             let y = addr.y as i32 * tile_size;
                             ctx.draw(&mut surface, &tex, (x, y), &draw_config);
 
-                            // keeping this as an example:
-                            // ctx.debug_rectangle(&mut surface, rect.lower_left(), rect.upper_right(), (0.0, 0.0, 0.0, 1.0));
+                        }
+                    }
+
+                    for (wall_addr, wall_type) in dungeon.walls().iter() {
+                        if *wall_type == WallType::Wall {
+                            let TileAddress { x, y } = wall_addr.tile();
+                            let (base_to, base_from) = match wall_addr.direction() {
+                                CompassDirection::North => ((0,1), (1,1)),
+                                CompassDirection::East => ((1,1), (1,0)),
+                                CompassDirection::South => ((0,0), (1,0)),
+                                CompassDirection::West => ((0,0), (0,1)),
+                            };
+                            let to_px = |(dx, dy)| {
+                                ((dx + x as i32) * tile_size, (dy + y as i32) * tile_size)
+                            };
+                            ctx.debug_line(&mut surface, to_px(base_from), to_px(base_to), (0.0, 0.0, 0.0, 1.0));
                         }
                     }
                 }
