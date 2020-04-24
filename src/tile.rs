@@ -1,8 +1,10 @@
 use std::convert::TryFrom;
 use std::ops::{Index, IndexMut, Add};
 use std::cmp::Eq;
-use std::slice::Iter;
+use std::slice::{Iter, IterMut};
 use std::iter::Enumerate;
+use std::marker::PhantomData;
+use std::borrow::{BorrowMut, Borrow};
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct TileAddress {
@@ -175,9 +177,26 @@ impl<T: Default + Clone> GridWalls<T> {
 impl<T> GridWalls<T> {
     fn iter(&self) -> GridWallsIterator<T> {
         GridWallsIterator {
-            parent: self,
             direction: Some(CompassDirection::North),
-            inner: self.north_walls.iter().enumerate()
+            grid_width: self.grid_width,
+            wall_iters: [
+                self.north_walls.iter().enumerate(),
+                self.east_walls.iter().enumerate(),
+                self.south_walls.iter().enumerate(),
+                self.west_walls.iter().enumerate()
+            ]
+        }
+    }
+    fn iter_mut(&mut self) -> GridWallsIteratorMut<T> {
+        GridWallsIteratorMut {
+            direction: Some(CompassDirection::North),
+            grid_width: self.grid_width,
+            wall_iters: [
+                self.north_walls.iter_mut().enumerate(),
+                self.east_walls.iter_mut().enumerate(),
+                self.south_walls.iter_mut().enumerate(),
+                self.west_walls.iter_mut().enumerate()
+            ]
         }
     }
 }
@@ -217,6 +236,7 @@ impl<T> IndexMut<WallAddress> for GridWalls<T> {
         }
     }
 }
+
 impl <'a, T> IntoIterator for &'a GridWalls<T> {
     type Item = (WallAddress, &'a T);
     type IntoIter = GridWallsIterator<'a, T>;
@@ -225,92 +245,109 @@ impl <'a, T> IntoIterator for &'a GridWalls<T> {
         self.iter()
     }
 }
+
+fn wall_addr_from_grid_index(index: usize, direction: CompassDirection, grid_width: usize) -> WallAddress {
+    match direction {
+        CompassDirection::North => {
+            WallAddress::new(
+                TileAddress {
+                    x: index % grid_width,
+                    y: index / grid_width,
+                },
+                CompassDirection::North
+            )
+        },
+        CompassDirection::East => {
+            WallAddress::new(
+                TileAddress {
+                    x: index % grid_width,
+                    y: index / grid_width,
+                },
+                CompassDirection::East
+            )
+        },
+        CompassDirection::South => {
+            WallAddress::new(
+                TileAddress {
+                    x: index,
+                    y: 0
+                },
+                CompassDirection::South
+            )
+        },
+        CompassDirection::West => {
+            WallAddress::new(
+                TileAddress {
+                    x: 0,
+                    y: index,
+                },
+                CompassDirection::West
+            )
+        }
+    }
+}
+fn next_direction(current: CompassDirection) -> Option<CompassDirection> {
+    match current {
+        CompassDirection::North => Some(CompassDirection::East),
+        CompassDirection::East => Some(CompassDirection::South),
+        CompassDirection::South => Some(CompassDirection::West),
+        CompassDirection::West => None,
+    }
+}
+
 pub struct GridWallsIterator<'a, T> {
-    parent: &'a GridWalls<T>,
+    grid_width: usize,
+    wall_iters: [Enumerate<Iter<'a, T>>; 4],
     direction: Option<CompassDirection>,
-    inner: Enumerate<Iter<'a, T>>
 }
 impl <'a, T> Iterator for GridWallsIterator<'a, T> {
     type Item = (WallAddress, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.direction {
-            None => None,
-            Some(CompassDirection::North) => {
-                self.inner.next()
-                    .map(|(index, t)| {
-                        let addr = WallAddress::new(
-                            TileAddress {
-                                x: index % self.parent.grid_width,
-                                y: index / self.parent.grid_width,
-                            },
-                            CompassDirection::North
-                        );
-                        (addr, t)
-                    })
-                    .or_else(|| {
-                        // if we ran out of north walls, move on to the east walls
-                        self.direction = Some(CompassDirection::East);
-                        self.inner = self.parent.east_walls.iter().enumerate();
-                        self.next()
-                    })
-            },
-            Some(CompassDirection::East) => {
-                self.inner.next()
-                    .map(|(index, t)| {
-                        let addr = WallAddress::new(
-                            TileAddress {
-                                x: index % self.parent.grid_width,
-                                y: index / self.parent.grid_width,
-                            },
-                            CompassDirection::East
-                        );
-                        (addr, t)
-                    })
-                    .or_else(|| {
-                    // if we ran out of east walls, move on to the south walls
-                        self.direction = Some(CompassDirection::South);
-                        self.inner = self.parent.south_walls.iter().enumerate();
-                        self.next()
-                    })
-            }
-            Some(CompassDirection::South) => {
-                self.inner.next()
-                    .map(|(index, t)| {
-                        let addr = WallAddress::new(
-                            TileAddress {
-                                x: index,
-                                y: 0
-                            },
-                            CompassDirection::South
-                        );
-                        (addr, t)
-                    })
-                    .or_else(|| {
-                        // if we ran out of south walls, move on to the west walls
-                        self.direction = Some(CompassDirection::West);
-                        self.inner = self.parent.west_walls.iter().enumerate();
-                        self.next()
-                    })
-            },
-            Some(CompassDirection::West) => {
-                self.inner.next()
-                    .map(|(index, t)| {
-                        let addr = WallAddress::new(
-                            TileAddress {
-                                x: 0,
-                                y: index,
-                            },
-                            CompassDirection::West
-                        );
-                        (addr, t)
-                    })
-                    .or_else(|| {
-                        // if we ran out of west walls, we're done!
-                        self.direction = None;
-                        None
-                    })
-            }
-        }
+        self.direction.and_then(|d| {
+            let inner_iter = match d {
+                CompassDirection::North => &mut self.wall_iters[0],
+                CompassDirection::East => &mut self.wall_iters[1],
+                CompassDirection::South => &mut self.wall_iters[2],
+                CompassDirection::West => &mut self.wall_iters[3]
+            };
+            inner_iter.next()
+                .map(|(index, t)| {
+                    (wall_addr_from_grid_index(index, d, self.grid_width), t)
+                })
+                .or_else(|| {
+                    self.direction = next_direction(d);
+                    self.next()
+                })
+        })
+    }
+}
+
+pub struct GridWallsIteratorMut<'a, T> {
+    grid_width: usize,
+    wall_iters: [Enumerate<IterMut<'a, T>>; 4],
+    direction: Option<CompassDirection>,
+}
+
+impl <'a, T> Iterator for GridWallsIteratorMut<'a, T> {
+    type Item = (WallAddress, &'a mut T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.direction.and_then(|d| {
+            let inner_iter = match d {
+                CompassDirection::North => &mut self.wall_iters[0],
+                CompassDirection::East => &mut self.wall_iters[1],
+                CompassDirection::South => &mut self.wall_iters[2],
+                CompassDirection::West => &mut self.wall_iters[3]
+            };
+            inner_iter.next()
+                .map(|(index, t)| {
+                    (wall_addr_from_grid_index(index, d, self.grid_width), t)
+                })
+                .or_else(|| {
+                    self.direction = next_direction(d);
+                    self.next()
+                })
+        })
     }
 }
