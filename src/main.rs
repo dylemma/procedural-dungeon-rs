@@ -1,4 +1,5 @@
 use crow::{Context, DrawConfig, Texture};
+use crow::color::IDENTITY;
 use crow::glutin::event::{Event, StartCause, WindowEvent};
 use crow::glutin::event_loop::{ControlFlow, EventLoop};
 use crow::glutin::window::WindowBuilder;
@@ -9,6 +10,7 @@ use rand::{Rng, thread_rng};
 use crate::dungeon::{GridDungeon, GridDungeonGenerator, RandomRoomGridDungeonGenerator, RoomId, RoomSize};
 use crate::geom::{Corners, Rect};
 use crate::tile::{CompassDirection, TileAddress, WallType};
+use crate::dungeon::GridDungeonGraph;
 
 mod dungeon;
 mod geom;
@@ -46,7 +48,11 @@ fn main() -> Result<(), crow::Error> {
                     let tile_size = world.tile_pixel_size() as i32;
                     for addr in tiles.tile_addresses() {
                         if let Some((_room_id, room_weight)) = tiles[addr] {
-                            draw_config.color_modulation = color_weight.lerp_as_matrix(room_weight);
+                            if room_weight >= 1.0 {
+                                draw_config.color_modulation = IDENTITY;
+                            } else {
+                                draw_config.color_modulation = color_weight.lerp_as_matrix(room_weight);
+                            }
                             let x = addr.x as i32 * tile_size;
                             let y = addr.y as i32 * tile_size;
                             ctx.draw(&mut surface, &tex, (x, y), &draw_config);
@@ -156,7 +162,14 @@ impl World {
         let grid_width = pixel_bounds.width() as usize / self.tile_pixel_size;
         let grid_height = pixel_bounds.height() as usize / self.tile_pixel_size;
         let dungeon = self.generator.generate(grid_width, grid_height);
-        self.dungeon = Some(dungeon);
+
+        let mut graph = GridDungeonGraph::from(dungeon);
+        let start = TileAddress { x: 0, y: 0 };
+        let goal = TileAddress { x: grid_width - 1, y: grid_height - 1 };
+        graph.trim_dungeon(start, goal).unwrap_or_else(|msg| {
+            println!("trim_dungeon() failed: {}", msg);
+        });
+        self.dungeon = Some(graph.take());
     }
 
     fn tile_pixel_size(&self) -> usize { self.tile_pixel_size }

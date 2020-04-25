@@ -123,15 +123,44 @@ impl <T: Default + Clone> GridTiles<T> {
         let tiles_data = vec![Default::default(); grid_width * grid_height];
         GridTiles { grid_width, grid_height, tiles_data }
     }
+
+}
+impl <T> GridTiles<T> {
     pub fn has_tile(&self, address: &TileAddress) -> bool {
         address.x < self.grid_width && address.y < self.grid_height
     }
-}
-impl <T> GridTiles<T> {
     pub fn tile_addresses(&self) -> GridTilesAddresses<T> {
         GridTilesAddresses {
             parent: self,
             i: 0,
+        }
+    }
+    pub fn iter(&self) -> GridTilesIter<T> {
+        GridTilesIter {
+            grid_width: self.grid_width,
+            inner: self.tiles_data.iter().enumerate(),
+        }
+    }
+    pub fn iter_mut(&mut self) -> GridTilesIterMut<T> {
+        GridTilesIterMut {
+            grid_width: self.grid_width,
+            inner: self.tiles_data.iter_mut().enumerate()
+        }
+    }
+    pub fn get(&self, index: TileAddress) -> Option<&T> {
+        if self.has_tile(&index) {
+            let i = index.x + (index.y * self.grid_width);
+            self.tiles_data.get(i)
+        } else {
+            None
+        }
+    }
+    pub fn get_mut(&mut self, index: TileAddress) -> Option<&mut T> {
+        if self.has_tile(&index) {
+            let i = index.x + (index.y * self.grid_width);
+            self.tiles_data.get_mut(i)
+        } else {
+            None
         }
     }
 }
@@ -167,6 +196,37 @@ impl <'a, T> Iterator for GridTilesAddresses<'a, T> {
             self.i += 1;
             Some(TileAddress{ x, y })
         }
+    }
+}
+
+pub struct GridTilesIter<'a, T> {
+    grid_width: usize,
+    inner: Enumerate<Iter<'a, T>>
+}
+impl <'a, T> Iterator for GridTilesIter<'a, T> {
+    type Item = (TileAddress, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(index, t)| {
+            let x = index % self.grid_width;
+            let y = index / self.grid_width;
+            (TileAddress { x, y }, t)
+        })
+    }
+}
+pub struct GridTilesIterMut<'a, T> {
+    grid_width: usize,
+    inner: Enumerate<IterMut<'a, T>>
+}
+impl <'a, T> Iterator for GridTilesIterMut<'a, T> {
+    type Item = (TileAddress, &'a mut T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(index, t)| {
+            let x = index % self.grid_width;
+            let y = index / self.grid_width;
+            (TileAddress { x, y }, t)
+        })
     }
 }
 
