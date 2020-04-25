@@ -8,7 +8,7 @@ use rand::{Rng, thread_rng};
 use rand::distributions::{Distribution, WeightedIndex};
 use pathfinding::directed::dijkstra::dijkstra;
 
-use crate::tile::{GridTiles, GridWalls, TileAddress, WallType};
+use crate::tile::{GridTiles, GridWalls, TileAddress, WallType, WallAddress};
 use unordered_pair::UnorderedPair;
 
 pub struct GridDungeon<R, W = WallType> {
@@ -211,6 +211,44 @@ impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenera
     }
 }
 
+
+trait Sliding<I, T> {
+    fn sliding(self) -> SlidingIter<I, T>;
+}
+
+impl <S, T, I> Sliding<I, T> for S
+    where
+        S: IntoIterator<Item = T, IntoIter = I>,
+        I: Iterator<Item = T>
+{
+    fn sliding(self) -> SlidingIter<I, T> {
+        SlidingIter {
+            current: None,
+            iter: self.into_iter()
+        }
+    }
+}
+struct SlidingIter<I, T> {
+    current: Option<T>,
+    iter: I
+}
+impl <I, T> Iterator for SlidingIter<I, T>
+    where
+        I: Iterator<Item=T>,
+        T: Copy,
+{
+    type Item = (T, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().and_then(|n| {
+            match self.current.replace(n) {
+                None => self.next(),
+                Some(prev) => Some((prev, n)),
+            }
+        })
+    }
+}
+
 type BasicGridDungeon = GridDungeon<Option<(RoomId, f32)>>;
 type RoomIdPair = UnorderedPair<RoomId>;
 enum EdgeState {
@@ -305,14 +343,44 @@ impl GridDungeonGraph {
             let (TileAddress{x,y}, _) = self.rooms[room_id];
         });
 
-        let path_set: HashSet<RoomId> = path.iter().map(|id| { *id }).collect();
 
+        // mark the rooms along the path with a magic number weight that makes them render differently
+        // (note this is just a stopgap for testing, and should eventually be removed).
+        let path_set: HashSet<RoomId> = path.iter().map(|id| { *id }).collect();
         for (_, room_opt) in self.dungeon.tiles_mut().iter_mut() {
             if let Some((room_id, room_cost)) = room_opt {
                 if path_set.contains(room_id) {
                     *room_cost = 2.0; // magic number for now, we'll give it special rendering
                 }
             }
+        }
+
+        // mark the edges along the path as "connected"
+        path.iter().sliding().for_each(|(a, b)| {
+            let edge: RoomIdPair = UnorderedPair(*a, *b);
+            self.edge_data.insert(edge, EdgeState::Connected);
+        });
+
+        // collect walls that need to be converted to doors
+        let mut doorable_walls: HashMap<RoomIdPair, Vec<WallAddress>> = HashMap::new();
+        for (wall_addr, wall_data) in self.dungeon.walls().iter() {
+            if let Some(r1) = room_id_at(&self.dungeon, wall_addr.tile()) {
+                if let Some(r2) = wall_addr.neighbor().and_then(|n| room_id_at(&self.dungeon, n)) {
+                    let edge = UnorderedPair(r1, r2);
+                    match self.edge_data.get(&edge) {
+                        Some(&EdgeState::Connected) => {
+                            doorable_walls.entry(edge).or_default().push(wall_addr);
+                        },
+                        _ => (),
+                    }
+                }
+            }
+        }
+        // knock down a random wall for each inter-room edge
+        let mut rng = thread_rng();
+        for (_, walls) in doorable_walls {
+            let wall = walls[rng.gen_range(0, walls.len())];
+            self.dungeon.walls[wall] = WallType::Door;
         }
 
         Ok(())
