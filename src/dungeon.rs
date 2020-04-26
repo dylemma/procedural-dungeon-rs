@@ -1,17 +1,19 @@
 use std::cmp::{max, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::iter::Iterator;
 use std::num::NonZeroUsize;
 
+use num::clamp;
+use pathfinding::directed::dijkstra::dijkstra;
+use pathfinding::undirected::connected_components::connected_components;
 use rand::{Rng, thread_rng};
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::seq::SliceRandom;
-use pathfinding::directed::dijkstra::dijkstra;
-use pathfinding::undirected::connected_components::connected_components;
-
-use crate::tile::{GridTiles, GridWalls, TileAddress, WallType, WallAddress};
 use unordered_pair::UnorderedPair;
+
+use crate::tile::{CompassDirection, GridTiles, GridWalls, TileAddress, WallAddress, WallType};
 
 pub struct GridDungeon<R, W = WallType> {
     grid_width: usize,
@@ -42,6 +44,7 @@ impl<R, W> GridDungeon<R, W> {
     pub fn walls(&self) -> &GridWalls<W> { &self.walls }
     pub fn tiles_mut(&mut self) -> &mut GridTiles<R> { &mut self.tiles }
     pub fn walls_mut(&mut self) -> &mut GridWalls<W> { &mut self.walls }
+    pub fn tiles_and_walls_mut(&mut self) -> (&mut GridTiles<R>, &mut GridWalls<W>) { (&mut self.tiles, &mut self.walls) }
 }
 
 
@@ -218,23 +221,25 @@ trait Sliding<I, T> {
     fn sliding(self) -> SlidingIter<I, T>;
 }
 
-impl <S, T, I> Sliding<I, T> for S
+impl<S, T, I> Sliding<I, T> for S
     where
-        S: IntoIterator<Item = T, IntoIter = I>,
-        I: Iterator<Item = T>
+        S: IntoIterator<Item=T, IntoIter=I>,
+        I: Iterator<Item=T>
 {
     fn sliding(self) -> SlidingIter<I, T> {
         SlidingIter {
             current: None,
-            iter: self.into_iter()
+            iter: self.into_iter(),
         }
     }
 }
+
 struct SlidingIter<I, T> {
     current: Option<T>,
-    iter: I
+    iter: I,
 }
-impl <I, T> Iterator for SlidingIter<I, T>
+
+impl<I, T> Iterator for SlidingIter<I, T>
     where
         I: Iterator<Item=T>,
         T: Copy,
@@ -257,7 +262,7 @@ type RoomIdPair = UnorderedPair<RoomId>;
 #[derive(Eq, PartialEq)]
 enum EdgeState {
     Connected,
-    Unconnected
+    Unconnected,
 }
 
 // TODO: eventually make this a non-public implementation detail of the generator
@@ -267,11 +272,12 @@ pub struct GridDungeonGraph {
     adjacency: HashMap<RoomId, HashSet<RoomId>>,
     edge_data: HashMap<RoomIdPair, EdgeState>,
 }
+
 impl From<BasicGridDungeon> for GridDungeonGraph {
     fn from(dungeon: BasicGridDungeon) -> Self {
         // create an index lookup for room weights and southwest corners
         let mut rooms: HashMap<RoomId, (TileAddress, f32)> = HashMap::new();
-        dungeon.tiles().iter().for_each(|(addr, tile_data )| {
+        dungeon.tiles().iter().for_each(|(addr, tile_data)| {
             if let Some((id, weight)) = tile_data {
                 rooms.entry(*id)
                     .and_modify(|(prev_addr, prev_weight)| {
@@ -311,10 +317,47 @@ impl From<BasicGridDungeon> for GridDungeonGraph {
         }
     }
 }
+
 fn room_id_at(dungeon: &BasicGridDungeon, tile: TileAddress) -> Option<RoomId> {
     dungeon.tiles().get(tile)?.map(|(id, _)| id)
 }
 
+/// Graph representing a series of interconnected points in the [0..1) space.
+/// Meant to be interpreted as relative positions in a GridDungeon to describe
+/// a general layout of main paths.
+pub struct BiasGraph<N> {
+    nodes: HashMap<N, (f32, f32)>,
+    edges: Vec<(N, N)>,
+}
+
+impl<'a, N: 'a + Copy + Eq + Hash> BiasGraph<N> {
+    pub fn new<NL, EL>(nodes: NL, edges: EL) -> Self
+        where
+            NL: IntoIterator<Item=&'a (N, (f32, f32))>,
+            EL: IntoIterator<Item=&'a (N, N)>
+    {
+        let nodes_map: HashMap<N, (f32, f32)> = nodes.into_iter().cloned().collect();
+        let edges_vec = edges.into_iter().cloned().filter(|(l, r)| {
+            nodes_map.contains_key(l) && nodes_map.contains_key(r)
+        }).collect();
+
+        BiasGraph {
+            nodes: nodes_map,
+            edges: edges_vec,
+        }
+    }
+
+    pub fn real_edges<P, FP>(&self, get_real_pos: FP) -> Vec<(P, P)>
+        where
+            P: Copy,
+            FP: Fn(f32, f32) -> P
+    {
+        let addresses: HashMap<N, P> = self.nodes.iter().map(|(id, &(x, y))| (*id, get_real_pos(x, y))).collect();
+        self.edges.iter().map(|(a, b)| {
+            (addresses[a], addresses[b])
+        }).collect()
+    }
+}
 
 type GraphError = (&'static str, GridDungeonGraph);
 
@@ -323,45 +366,122 @@ impl GridDungeonGraph {
         self.dungeon
     }
 
-    pub fn trim_dungeon(&mut self, start: TileAddress, goal: TileAddress) -> Result<(), &str> {
-        let start_room = room_id_at(&self.dungeon, start).ok_or("invalid start")?;
-        let goal_room = room_id_at(&self.dungeon, goal).ok_or("invalid goal")?;
+    pub fn find_nearest_room(&self, target: &TileAddress) -> &(RoomId, f32) {
+        match self.dungeon.tiles.get(*target) {
+            // happy path: the dungeon has a room at the target address
+            Some(Some(data)) => data,
 
-        let (path, _path_cost) = dijkstra(
-            &start_room,
-            |current_room| {
-                self.adjacency
-                    .get(current_room).into_iter()
-                    .flat_map(|neighbors| {
-                        neighbors.iter().map(|neighbor_id| {
-                            // f32 doesn't have an Ord, so we'll map the [0.0, 1.0) range to [0, 256) for cost calculations
-                            let cost = (self.rooms[neighbor_id].1 * 256.0) as i32;
-                            (*neighbor_id, cost)
+            // no room at the address; do a search to find a valid address with room data
+            _ => {
+                let x = clamp(target.x, 0, self.dungeon.grid_width() - 1);
+                let y = clamp(target.y, 0, self.dungeon.grid_height() - 1);
+                let path_opt = dijkstra(
+                    &TileAddress {
+                        x: clamp(target.x, 0, self.dungeon.grid_width() - 1),
+                        y: clamp(target.y, 0, self.dungeon.grid_height() - 1),
+                    },
+                    |&TileAddress { x, y }| {
+                        let x_1: Option<usize> = x.checked_sub(1);
+                        let y_1: Option<usize> = y.checked_sub(1);
+                        vec![
+                            Some((TileAddress { x, y: y + 1 }, 1000)), // North
+                            Some((TileAddress { x: x + 1, y: y + 1 }, 1414)), // Northeast
+                            Some((TileAddress { x: x + 1, y }, 1000)), // East
+                            y_1.map(|yy| (TileAddress { x: x + 1, y: yy }, 1414)), // Southeast
+                            y_1.map(|yy| (TileAddress { x, y: yy }, 1000)), // South
+                            x_1.and_then(|xx| y_1.map(|yy| (TileAddress { x: xx, y: yy }, 1414))), // Southwest
+                            x_1.map(|xx| (TileAddress { x: xx, y }, 1000)), // West
+                            x_1.map(|xx| (TileAddress { x: xx, y: y + 1 }, 1414)), // Northwest
+                        ].into_iter().flatten()
+                    },
+                    |addr| {
+                        match self.dungeon.tiles.get(*addr) {
+                            Some(Some(_data)) => true,
+                            _ => false,
+                        }
+                    },
+                );
+                let path = path_opt.expect("No nearest tile. Grid must be completely empty.").0;
+                let addr = path[path.len() - 1];
+                match self.dungeon.tiles.get(addr) {
+                    Some(Some(data)) => data,
+                    _ => panic!("impossible case")
+                }
+            }
+        }
+    }
+
+    pub fn connect_bias_paths<N: Copy + Eq + Hash>(&mut self, bias: &BiasGraph<N>) {
+        let edges = bias.real_edges(|rx, ry| {
+            self.find_nearest_room(&TileAddress {
+                x: (rx * self.dungeon.grid_width() as f32).floor() as usize,
+                y: (ry * self.dungeon.grid_height() as f32).floor() as usize,
+            }).0
+        });
+
+        for (start_room, goal_room) in edges {
+            let path_opt = dijkstra(
+                &start_room,
+                |current_room| {
+                    self.adjacency
+                        .get(current_room).into_iter()
+                        .flat_map(|neighbors| {
+                            neighbors.iter().map(|neighbor_id| {
+                                // f32 doesn't have an Ord, so we'll map the [0.0, 1.0) range to [0, 256) for cost calculations
+                                let cost = (self.rooms[neighbor_id].1 * 256.0) as i32;
+                                (*neighbor_id, cost)
+                            })
                         })
-                    })
-            },
-            |current_room| { *current_room == goal_room }
-        ).ok_or("no path found")?;
+                },
+                |current_room| { *current_room == goal_room },
+            );
 
+            if let Some((path, _path_cost)) = path_opt {
+                for room in path.iter() {
+                    self.set_room_weight(room, 2.0);
+                }
+                for (a, b) in path.iter().sliding() {
+                    self.edge_data.insert(UnorderedPair(*a, *b), EdgeState::Connected);
+                }
+            }
+        }
+    }
 
-        // mark the rooms along the path with a magic number weight that makes them render differently
-        // (note this is just a stopgap for testing, and should eventually be removed).
-        let path_set: HashSet<RoomId> = path.iter().map(|id| { *id }).collect();
-        for (_, room_opt) in self.dungeon.tiles_mut().iter_mut() {
-            if let Some((room_id, room_cost)) = room_opt {
-                if path_set.contains(room_id) {
-                    *room_cost = 2.0; // magic number for now, we'll give it special rendering
+    pub fn remove_unconnected_rooms(&mut self) {
+        let connected_rooms: HashSet<RoomId> = self.edge_data.iter()
+            .filter_map(|(edge, state)| {
+                if *state == EdgeState::Connected { Some(edge) } else { None }
+            })
+            .flat_map(|UnorderedPair(r1, r2)| { vec![*r1, *r2] })
+            .collect();
+
+        // remove any walls
+        {
+            // local scope here to limit how long we mutably borrow `self.dungeon`
+            let (tiles, walls) = self.dungeon.tiles_and_walls_mut();
+            for (wall_addr, wall_type) in walls.iter_mut() {
+                if let Some((r1, _)) = tiles[wall_addr.tile()] {
+                    if let Some((r2, _)) = wall_addr.neighbor().and_then(|tile| tiles.get(tile)).and_then(|x| *x) {
+                        if !connected_rooms.contains(&r1) && !connected_rooms.contains(&r2) {
+                            *wall_type = WallType::Clear;
+                        }
+                    }
                 }
             }
         }
 
-        // mark the edges along the path as "connected"
-        path.iter().sliding().for_each(|(a, b)| {
-            let edge: RoomIdPair = UnorderedPair(*a, *b);
-            self.edge_data.insert(edge, EdgeState::Connected);
-        });
-
-        Ok(())
+        for (_addr, tile_data) in self.dungeon.tiles_mut().iter_mut() {
+            match tile_data {
+                Some((room_id, _)) => {
+                    if !connected_rooms.contains(room_id) { *tile_data = None }
+                }
+                _ => ()
+            }
+        }
+        self.adjacency.retain(|room_id, _neighbors| connected_rooms.contains(room_id));
+        for (_, neighbors) in self.adjacency.iter_mut() {
+            neighbors.retain(|id| connected_rooms.contains(id));
+        }
     }
 
     pub fn random_branching_grow(&mut self, num_endpoints: usize) {
@@ -412,7 +532,7 @@ impl GridDungeonGraph {
                                 (*neighbor, cost)
                             })
                         },
-                        |room| *room == target_room
+                        |room| *room == target_room,
                     );
                     if let Some((path, _cost)) = path_opt {
                         // success!
@@ -421,13 +541,13 @@ impl GridDungeonGraph {
                         // mark all rooms along the path as connected
                         path.iter().for_each(|room| {
                             if connected.insert(*room) {
-                                self.set_room_weight(&room, 2.0);
+                                self.set_room_weight(&room, 1.2);
                             }
                         });
 
                         // mark all edges along the path as connected
                         path.iter().sliding().for_each(|(a, b)| {
-                           self.edge_data.insert(UnorderedPair(*a, *b), EdgeState::Connected);
+                            self.edge_data.insert(UnorderedPair(*a, *b), EdgeState::Connected);
                         });
                     }
                 }
@@ -486,7 +606,7 @@ impl GridDungeonGraph {
                     frontier.push(advance_to);
                 }
                 // mark the added room with a special "weight" to make it render white
-                self.set_room_weight(&advance_to, 2.0);
+                self.set_room_weight(&advance_to, 1.4);
             }
 
             // update the frontier (don't try to be fancy by only removing the `room_id` and the `neighbor`,
@@ -509,7 +629,7 @@ impl GridDungeonGraph {
                     vec![].into_iter()
                 }
             })
-            .filter(|room_id|{ seen.insert(*room_id) })
+            .filter(|room_id| { seen.insert(*room_id) })
             .collect();
 
         // Remove any rooms from the `frontier` whose only adjacent neighbors are also in the `frontier`.
@@ -536,7 +656,7 @@ impl GridDungeonGraph {
             self.edge_data.insert(UnorderedPair(room_id, *neighbor), EdgeState::Connected);
 
             // mark the added room with a special "weight" to make it render white
-            self.set_room_weight(neighbor, 2.0);
+            self.set_room_weight(neighbor, 1.6);
 
             // add the neighbor to the frontier (it'll just be removed next if it is surrounded)
             if seen.insert(*neighbor) {
@@ -551,6 +671,9 @@ impl GridDungeonGraph {
         }
     }
 
+    /// Sets the weight of all tiles in the given room.
+    /// Really this is used for debugging+rendering purposes,
+    /// since the main display loop will pick a color based on the weight of each room.
     pub fn set_room_weight(&mut self, room: &RoomId, weight: f32) {
         self.rooms.entry(*room).and_modify(|(_, w)| *w = 2.0);
 
@@ -559,7 +682,7 @@ impl GridDungeonGraph {
             let mut corner_x = room_addr.x;
             let mut corner_y = room_addr.y;
             let check = |x: usize, y: usize| {
-                self.dungeon.tiles().get(TileAddress{ x, y }).map_or_else(|| false, |tile_data| {
+                self.dungeon.tiles().get(TileAddress { x, y }).map_or_else(|| false, |tile_data| {
                     match tile_data {
                         Some((id, _)) => id == room,
                         _ => false
@@ -571,9 +694,9 @@ impl GridDungeonGraph {
             while check(corner_x, corner_y) { corner_y += 1 }
             corner_y -= 1;
 
-            for x in room_addr.x .. (corner_x + 1) {
-                for y in room_addr.y .. (corner_y + 1) {
-                    self.dungeon.tiles_mut()[TileAddress{ x, y }] = Some((*room, weight));
+            for x in room_addr.x..(corner_x + 1) {
+                for y in room_addr.y..(corner_y + 1) {
+                    self.dungeon.tiles_mut()[TileAddress { x, y }] = Some((*room, weight));
                 }
             }
         }
@@ -590,7 +713,7 @@ impl GridDungeonGraph {
                     match self.edge_data.get(&edge) {
                         Some(&EdgeState::Connected) => {
                             doorable_walls.entry(edge).or_default().push(wall_addr);
-                        },
+                        }
                         _ => (),
                     }
                 }

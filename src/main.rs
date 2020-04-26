@@ -10,7 +10,7 @@ use rand::{Rng, thread_rng};
 use crate::dungeon::{GridDungeon, GridDungeonGenerator, RandomRoomGridDungeonGenerator, RoomId, RoomSize};
 use crate::geom::{Corners, Rect};
 use crate::tile::{CompassDirection, TileAddress, WallType};
-use crate::dungeon::GridDungeonGraph;
+use crate::dungeon::{GridDungeonGraph, BiasGraph};
 
 mod dungeon;
 mod geom;
@@ -26,6 +26,10 @@ fn main() -> Result<(), crow::Error> {
     let color_weight = ColorLerp {
         from: [0.1, 0.9, 0.2, 1.0],
         to  : [1.0, 0.1, 0.1, 1.0]
+    };
+    let debug_colors = ColorLerp {
+        from: [0.1, 0.6, 1.0, 1.0],
+        to  : [1.0, 1.0, 1.0, 1.0],
     };
 
     let mut world = World::new();
@@ -49,7 +53,12 @@ fn main() -> Result<(), crow::Error> {
                     for addr in tiles.tile_addresses() {
                         if let Some((_room_id, room_weight)) = tiles[addr] {
                             if room_weight >= 1.0 {
-                                draw_config.color_modulation = IDENTITY;
+                                // for debugging
+                                if room_weight <= 2.0 {
+                                    draw_config.color_modulation = debug_colors.lerp_as_matrix(room_weight - 1.0);
+                                } else {
+                                    draw_config.color_modulation = IDENTITY;
+                                }
                             } else {
                                 draw_config.color_modulation = color_weight.lerp_as_matrix(room_weight);
                             }
@@ -85,8 +94,6 @@ fn main() -> Result<(), crow::Error> {
                                     CompassDirection::West => draw_vertical_door(&mut ctx, &mut surface, tile_size, x as f32, y as f32),
                                 }
                             }
-                        }
-                        if *wall_type == WallType::Wall {
                         }
                     }
                 }
@@ -142,10 +149,10 @@ impl ColorLerp {
         let from = self.from;
         let to = self.to;
         [
-            to[0] + (from[0] - to[0]) * dist,
-            to[1] + (from[1] - to[1]) * dist,
-            to[2] + (from[2] - to[2]) * dist,
-            to[3] + (from[3] - to[3]) * dist,
+            from[0] + (to[0] - from[0]) * dist,
+            from[1] + (to[1] - from[1]) * dist,
+            from[2] + (to[2] - from[2]) * dist,
+            from[3] + (to[3] - from[3]) * dist,
         ]
     }
     fn lerp_as_matrix(&self, dist: f32) -> [[f32; 4]; 4] {
@@ -201,15 +208,31 @@ impl World {
         let grid_height = pixel_bounds.height() as usize / self.tile_pixel_size;
         let dungeon = self.generator.generate(grid_width, grid_height);
 
+        // a diamond pattern with the points near the corners of the grid
+        let bias_graph = BiasGraph::new(
+            &vec![
+                ("start", (0.0, 0.0)),
+                ("upper-left", (0.25, 0.75)),
+                ("lower-right", (0.75, 0.25)),
+                ("end", (1.0, 1.0))
+            ],
+            &vec![
+                ("start", "upper-left"),
+                ("upper-left", "lower-right"),
+                ("lower-right", "end"),
+                ("start", "lower-right"),
+                ("upper-left", "end")
+            ]
+        );
+
         let mut graph = GridDungeonGraph::from(dungeon);
-        let start = TileAddress { x: 0, y: 0 };
-        let goal = TileAddress { x: grid_width - 1, y: grid_height - 1 };
-        graph.trim_dungeon(start, goal).unwrap_or_else(|msg| {
-            println!("trim_dungeon() failed: {}", msg);
-        });
+
+        graph.connect_bias_paths(&bias_graph);
         graph.random_branching_grow(15);
-        // graph.dfs_grow_path(5, 50);
-        graph.bfs_grow_path(50);
+        graph.dfs_grow_path(5, 50);
+        graph.bfs_grow_path(100);
+
+        graph.remove_unconnected_rooms();
         graph.insert_doors();
         self.dungeon = Some(graph.take());
     }
