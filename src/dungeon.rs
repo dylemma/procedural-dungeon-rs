@@ -6,7 +6,9 @@ use std::num::NonZeroUsize;
 
 use rand::{Rng, thread_rng};
 use rand::distributions::{Distribution, WeightedIndex};
+use rand::seq::SliceRandom;
 use pathfinding::directed::dijkstra::dijkstra;
+use pathfinding::undirected::connected_components::connected_components;
 
 use crate::tile::{GridTiles, GridWalls, TileAddress, WallType, WallAddress};
 use unordered_pair::UnorderedPair;
@@ -251,6 +253,8 @@ impl <I, T> Iterator for SlidingIter<I, T>
 
 type BasicGridDungeon = GridDungeon<Option<(RoomId, f32)>>;
 type RoomIdPair = UnorderedPair<RoomId>;
+
+#[derive(Eq, PartialEq)]
 enum EdgeState {
     Connected,
     Unconnected
@@ -319,7 +323,7 @@ impl GridDungeonGraph {
         self.dungeon
     }
 
-    pub fn trim_dungeon(&mut self, start: TileAddress, goal: TileAddress) -> Result<(), &str>{
+    pub fn trim_dungeon(&mut self, start: TileAddress, goal: TileAddress) -> Result<(), &str> {
         let start_room = room_id_at(&self.dungeon, start).ok_or("invalid start")?;
         let goal_room = room_id_at(&self.dungeon, goal).ok_or("invalid goal")?;
 
@@ -339,10 +343,6 @@ impl GridDungeonGraph {
             |current_room| { *current_room == goal_room }
         ).ok_or("no path found")?;
 
-        path.iter().for_each(|room_id| {
-            let (TileAddress{x,y}, _) = self.rooms[room_id];
-        });
-
 
         // mark the rooms along the path with a magic number weight that makes them render differently
         // (note this is just a stopgap for testing, and should eventually be removed).
@@ -360,6 +360,226 @@ impl GridDungeonGraph {
             let edge: RoomIdPair = UnorderedPair(*a, *b);
             self.edge_data.insert(edge, EdgeState::Connected);
         });
+
+        Ok(())
+    }
+
+    pub fn random_branching_grow(&mut self, num_endpoints: usize) {
+        // identify the "main path" of pre-connected rooms
+        let preconnected: HashSet<RoomId> = self.edge_data.iter()
+            .flat_map(|(rooms, edge_state)| {
+                if *edge_state == EdgeState::Connected {
+                    vec![rooms.0, rooms.1].into_iter()
+                } else {
+                    vec![].into_iter()
+                }
+            })
+            .collect();
+
+        // copy the pre-connected set of rooms in a set
+        // that will grow to include any new rooms we visit below
+        let mut connected = preconnected.clone();
+
+        // pick an arbitrary point to use as the start in our path searching later
+        let search_start = match connected.iter().next() {
+            Some(x) => *x,
+            None => return // bail if there are no pre-connected rooms
+        };
+
+        let mut rng = thread_rng();
+
+        // try to get num_endpoints `target_room`s that aren't already in the 'connected' set,
+        // but make sure to give up trying after `max_attempts` to avoid infinite looping if
+        // every room happens to be connected
+        let mut remaining_attempts = num_endpoints * 10;
+        let mut remaining_outputs = num_endpoints;
+        while remaining_attempts > 0 && remaining_outputs > 0 {
+            remaining_attempts -= 1;
+
+            // pick a random position, and whatever room is there is our target
+            let x = rng.gen_range(0, self.dungeon.grid_width());
+            let y = rng.gen_range(0, self.dungeon.grid_height());
+            if let Some(target_room) = room_id_at(&self.dungeon, TileAddress { x, y }) {
+                // avoid target rooms that are already connected
+                if !connected.contains(&target_room) {
+                    // use dijkstra's algorithm to get the shortest weighted path from our `search_start` to tht target room.
+                    // treat any pre-connected room as a zero-cost node.
+                    let path_opt = dijkstra(
+                        &search_start,
+                        |room| {
+                            self.adjacency[room].iter().map(|neighbor| {
+                                let cost = if preconnected.contains(neighbor) { 0 } else { (self.rooms[neighbor].1 * 256.0) as i32 };
+                                (*neighbor, cost)
+                            })
+                        },
+                        |room| *room == target_room
+                    );
+                    if let Some((path, _cost)) = path_opt {
+                        // success!
+                        remaining_outputs -= 1;
+
+                        // mark all rooms along the path as connected
+                        path.iter().for_each(|room| {
+                            if connected.insert(*room) {
+                                self.set_room_weight(&room, 2.0);
+                            }
+                        });
+
+                        // mark all edges along the path as connected
+                        path.iter().sliding().for_each(|(a, b)| {
+                           self.edge_data.insert(UnorderedPair(*a, *b), EdgeState::Connected);
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn dfs_grow_path(&mut self, num_seeds: usize, mut iterations: u32) {
+        // create a vector of the rooms that are "connected" via an EdgeState::Connected edge touching them.
+        // avoid adding duplicate entries to the `frontier` by also tracking `seen` rooms
+        let mut connected = HashSet::new();
+        let mut frontier: Vec<RoomId> = self.edge_data.iter()
+            .flat_map(|(rooms, edge_state)| {
+                if *edge_state == EdgeState::Connected {
+                    vec![rooms.0, rooms.1].into_iter()
+                } else {
+                    vec![].into_iter()
+                }
+            })
+            .filter(|room_id| { connected.insert(*room_id) })
+            .collect();
+
+        // Remove any rooms from the `frontier` whose only adjacent neighbors are also in the `frontier`.
+        // The whole point is to add connections to rooms that aren't in the frontier,
+        // so if would defeat the purpose if we picked a room that was surrounded by already-connected rooms.
+        frontier.retain(|room_id| {
+            self.adjacency[room_id].iter().any(|neighbor_id| { !connected.contains(neighbor_id) })
+        });
+
+        // replace the "frontier" with a subset of the frontier rooms
+        let mut rng = thread_rng();
+        frontier = frontier.choose_multiple(&mut rng, num_seeds).cloned().collect();
+
+        while iterations > 0 && !frontier.is_empty() {
+            iterations -= 1;
+
+            let advance_index = rng.gen_range(0, frontier.len());
+            let advance_from = frontier[advance_index];
+            let (neighbors, weights): (Vec<RoomId>, Vec<f32>) = self.adjacency[&advance_from].iter().cloned()
+                .filter(|n_id| {
+                    let edge = UnorderedPair(advance_from, *n_id);
+                    self.edge_data[&edge] != EdgeState::Connected && !connected.contains(n_id)
+                })
+                .map(|n_id| {
+                    // we want to favor lower-cost rooms in our choice of neighbor,
+                    // which means inverting the weight for WeightedIndex distribution purposes
+                    let weight = f32::max(0.0, 1.0 - self.rooms[&n_id].1);
+                    (n_id, weight)
+                })
+                .unzip();
+            if let Some(dist) = WeightedIndex::new(weights).ok() {
+                let advance_to = neighbors[dist.sample(&mut rng)];
+
+                self.edge_data.insert(UnorderedPair(advance_from, advance_to), EdgeState::Connected);
+                if connected.insert(advance_to) {
+                    frontier.push(advance_to);
+                }
+                // mark the added room with a special "weight" to make it render white
+                self.set_room_weight(&advance_to, 2.0);
+            }
+
+            // update the frontier (don't try to be fancy by only removing the `room_id` and the `neighbor`,
+            // since connecting the neighbor may have removed the last 'frontier room' from another room on the frontier)
+            frontier.retain(|room_id| {
+                self.adjacency[room_id].iter().any(|neighbor_id| { !connected.contains(neighbor_id) })
+            });
+        }
+    }
+
+    pub fn bfs_grow_path(&mut self, mut iterations: u32) {
+        // create a vector of the rooms that are "connected" via an EdgeState::Connected edge touching them.
+        // avoid adding duplicate entries to the `frontier` by also tracking `seen` rooms
+        let mut seen = HashSet::new();
+        let mut frontier: Vec<RoomId> = self.edge_data.iter()
+            .flat_map(|(rooms, edge_state)| {
+                if *edge_state == EdgeState::Connected {
+                    vec![rooms.0, rooms.1].into_iter()
+                } else {
+                    vec![].into_iter()
+                }
+            })
+            .filter(|room_id|{ seen.insert(*room_id) })
+            .collect();
+
+        // Remove any rooms from the `frontier` whose only adjacent neighbors are also in the `frontier`.
+        // The whole point is to add connections to rooms that aren't in the frontier,
+        // so if would defeat the purpose if we picked a room that was surrounded by already-connected rooms.
+        frontier.retain(|room_id| {
+            self.adjacency[room_id].iter().any(|neighbor_id| { !seen.contains(neighbor_id) })
+        });
+
+        // with the setup done, we can start randomly picking rooms from the frontier and "connecting" them
+        let mut rng = thread_rng();
+        while iterations > 0 && !frontier.is_empty() {
+            iterations -= 1;
+
+            // pick a random unconnected neighbor that is adjacent to the 'frontier', and connect it
+            let f_index = rng.gen_range(0, frontier.len());
+            let room_id = frontier[f_index];
+            let unconnected_neighbors: Vec<RoomId> = self.adjacency[&room_id].iter().cloned().filter(|neighbor_id| {
+                let edge = UnorderedPair(room_id, *neighbor_id);
+                self.edge_data[&edge] != EdgeState::Connected && !seen.contains(neighbor_id)
+            }).collect();
+            let neighbor = unconnected_neighbors.choose(&mut rng)
+                .expect("Any room on the 'frontier' should have at least one unconnected neighbor");
+            self.edge_data.insert(UnorderedPair(room_id, *neighbor), EdgeState::Connected);
+
+            // mark the added room with a special "weight" to make it render white
+            self.set_room_weight(neighbor, 2.0);
+
+            // add the neighbor to the frontier (it'll just be removed next if it is surrounded)
+            if seen.insert(*neighbor) {
+                frontier.push(*neighbor);
+            }
+
+            // update the frontier (don't try to be fancy by only removing the `room_id` and the `neighbor`,
+            // since connecting the neighbor may have removed the last 'frontier room' from another room on the frontier)
+            frontier.retain(|room_id| {
+                self.adjacency[room_id].iter().any(|neighbor_id| { !seen.contains(neighbor_id) })
+            });
+        }
+    }
+
+    pub fn set_room_weight(&mut self, room: &RoomId, weight: f32) {
+        self.rooms.entry(*room).and_modify(|(_, w)| *w = 2.0);
+
+        if let Some(room_addr) = self.rooms.get(room).map(|(addr, _)| *addr) {
+            // the `rooms` index is initialized with the lower-left corners, so we need to identify the upper-right corner
+            let mut corner_x = room_addr.x;
+            let mut corner_y = room_addr.y;
+            let check = |x: usize, y: usize| {
+                self.dungeon.tiles().get(TileAddress{ x, y }).map_or_else(|| false, |tile_data| {
+                    match tile_data {
+                        Some((id, _)) => id == room,
+                        _ => false
+                    }
+                })
+            };
+            while check(corner_x, corner_y) { corner_x += 1 }
+            corner_x -= 1;
+            while check(corner_x, corner_y) { corner_y += 1 }
+            corner_y -= 1;
+
+            for x in room_addr.x .. (corner_x + 1) {
+                for y in room_addr.y .. (corner_y + 1) {
+                    self.dungeon.tiles_mut()[TileAddress{ x, y }] = Some((*room, weight));
+                }
+            }
+        }
+    }
+
+    pub fn insert_doors(&mut self) -> () {
 
         // collect walls that need to be converted to doors
         let mut doorable_walls: HashMap<RoomIdPair, Vec<WallAddress>> = HashMap::new();
@@ -382,7 +602,5 @@ impl GridDungeonGraph {
             let wall = walls[rng.gen_range(0, walls.len())];
             self.dungeon.walls[wall] = WallType::Door;
         }
-
-        Ok(())
     }
 }

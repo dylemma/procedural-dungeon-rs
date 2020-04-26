@@ -1,4 +1,4 @@
-use crow::{Context, DrawConfig, Texture};
+use crow::{Context, DrawConfig, Texture, DrawTarget};
 use crow::color::IDENTITY;
 use crow::glutin::event::{Event, StartCause, WindowEvent};
 use crow::glutin::event_loop::{ControlFlow, EventLoop};
@@ -61,18 +61,32 @@ fn main() -> Result<(), crow::Error> {
                     }
 
                     for (wall_addr, wall_type) in dungeon.walls().iter() {
+                        match *wall_type {
+                            WallType::Clear => (),
+                            WallType::Wall => {
+                                let TileAddress { x, y } = wall_addr.tile();
+                                let (base_to, base_from) = match wall_addr.direction() {
+                                    CompassDirection::North => ((0,1), (1,1)),
+                                    CompassDirection::East => ((1,1), (1,0)),
+                                    CompassDirection::South => ((0,0), (1,0)),
+                                    CompassDirection::West => ((0,0), (0,1)),
+                                };
+                                let to_px = |(dx, dy)| {
+                                    ((dx + x as i32) * tile_size, (dy + y as i32) * tile_size)
+                                };
+                                ctx.debug_line(&mut surface, to_px(base_from), to_px(base_to), (0.0, 0.0, 0.0, 1.0));
+                            }
+                            WallType::Door => {
+                                let TileAddress { x, y } = wall_addr.tile();
+                                match wall_addr.direction() {
+                                    CompassDirection::North => draw_horizontal_door(&mut ctx, &mut surface, tile_size, x as f32, y as f32 + 1.0),
+                                    CompassDirection::East => draw_vertical_door(&mut ctx, &mut surface, tile_size, (x + 1) as f32, y as f32),
+                                    CompassDirection::South => draw_horizontal_door(&mut ctx, &mut surface, tile_size, x as f32, y as f32),
+                                    CompassDirection::West => draw_vertical_door(&mut ctx, &mut surface, tile_size, x as f32, y as f32),
+                                }
+                            }
+                        }
                         if *wall_type == WallType::Wall {
-                            let TileAddress { x, y } = wall_addr.tile();
-                            let (base_to, base_from) = match wall_addr.direction() {
-                                CompassDirection::North => ((0,1), (1,1)),
-                                CompassDirection::East => ((1,1), (1,0)),
-                                CompassDirection::South => ((0,0), (1,0)),
-                                CompassDirection::West => ((0,0), (0,1)),
-                            };
-                            let to_px = |(dx, dy)| {
-                                ((dx + x as i32) * tile_size, (dy + y as i32) * tile_size)
-                            };
-                            ctx.debug_line(&mut surface, to_px(base_from), to_px(base_to), (0.0, 0.0, 0.0, 1.0));
                         }
                     }
                 }
@@ -94,6 +108,29 @@ fn main() -> Result<(), crow::Error> {
             _ => (),
         }
     )
+}
+
+const DOOR_COLOR: (f32, f32, f32, f32) = (0.25, 0.25, 0.25, 1.0);
+
+fn draw_horizontal_door<T: DrawTarget>(ctx: &mut Context, target: &mut T, tile_size: i32, x: f32, y: f32) {
+    // let TileAddress { x: xu, y: yu } = upper_left;
+    // let x = xu as f32;
+    // let y = yu as f32;
+    let pixel_pos = |xt: f32, yt: f32| { ((xt * tile_size as f32) as i32, (yt * tile_size as f32) as i32) };
+    ctx.debug_line(target, pixel_pos(x, y), pixel_pos(x + 0.25, y), DOOR_COLOR);
+    ctx.debug_line(target, pixel_pos(x + 0.75, y), pixel_pos(x + 1.0, y), DOOR_COLOR);
+    ctx.debug_line(target, pixel_pos(x + 0.25, y + 0.1), pixel_pos(x + 0.25, y - 0.1), DOOR_COLOR);
+    ctx.debug_line(target, pixel_pos(x + 0.75, y + 0.1), pixel_pos(x + 0.75, y - 0.1), DOOR_COLOR);
+}
+fn draw_vertical_door<T: DrawTarget>(ctx: &mut Context, target: &mut T, tile_size: i32, x: f32, y: f32) {
+    // let TileAddress { x: xu, y: yu } = upper_left;
+    // let x = xu as f32;
+    // let y = yu as f32;
+    let pixel_pos = |xt: f32, yt: f32| { ((xt * tile_size as f32) as i32, (yt * tile_size as f32) as i32) };
+    ctx.debug_line(target, pixel_pos(x, y), pixel_pos(x, y + 0.25), DOOR_COLOR);
+    ctx.debug_line(target, pixel_pos(x, y + 0.75), pixel_pos(x, y + 1.0), DOOR_COLOR);
+    ctx.debug_line(target, pixel_pos(x - 0.1, y + 0.25), pixel_pos(x + 0.1, y + 0.25), DOOR_COLOR);
+    ctx.debug_line(target, pixel_pos(x - 0.1, y + 0.75), pixel_pos(x + 0.1, y + 0.75), DOOR_COLOR);
 }
 
 struct ColorLerp {
@@ -126,6 +163,7 @@ fn window_bounds(ctx: &Context) -> Rect {
     Corners((0, 0), (ctx.window_width() as i32, ctx.window_height() as i32)).into()
 }
 
+
 type RoomData = Option<(RoomId, f32)>;
 
 struct World {
@@ -152,7 +190,7 @@ impl World {
             })
         }).collect();
         World {
-            tile_pixel_size: 24,
+            tile_pixel_size: 16,
             dungeon: None,
             generator: Box::new(RandomRoomGridDungeonGenerator::new(room_chances))
         }
@@ -169,6 +207,10 @@ impl World {
         graph.trim_dungeon(start, goal).unwrap_or_else(|msg| {
             println!("trim_dungeon() failed: {}", msg);
         });
+        graph.random_branching_grow(15);
+        // graph.dfs_grow_path(5, 50);
+        graph.bfs_grow_path(50);
+        graph.insert_doors();
         self.dungeon = Some(graph.take());
     }
 
