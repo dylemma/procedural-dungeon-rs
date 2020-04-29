@@ -10,7 +10,7 @@ use rand::{Rng, thread_rng};
 use crate::dungeon::{GridDungeon, GridDungeonGenerator, RandomRoomGridDungeonGenerator, RoomId, RoomSize};
 use crate::geom::{Corners, Rect};
 use crate::tile::{CompassDirection, TileAddress, WallType};
-use crate::dungeon::{GridDungeonGraph, BiasGraph};
+use crate::dungeon::{GridDungeonGraph, BiasGraph, GeneratorStrategy, GeneratorStep};
 
 mod dungeon;
 mod geom;
@@ -176,30 +176,51 @@ type RoomData = Option<(RoomId, f32)>;
 struct World {
     tile_pixel_size: usize,
     dungeon: Option<GridDungeon<RoomData>>,
-    generator: Box<dyn GridDungeonGenerator<RoomData>>
+    // generator: Box<dyn GridDungeonGenerator<RoomData>>
+    generator: GeneratorStrategy<&'static str>,
 }
 impl World {
     fn new() -> Self {
-        let room_chances = vec![
-            (RoomSize::new(5,4), 1),
-            (RoomSize::new(4,4), 2),
-            (RoomSize::new(4,3), 3),
-            (RoomSize::new(4,2), 3),
-            (RoomSize::new(4,1), 1),
-            (RoomSize::new(3,2), 5),
-            (RoomSize::new(3,1), 2),
-            (RoomSize::new(2,2), 5),
-            (RoomSize::new(2,1), 1),
-            (RoomSize::new(1,1), 1)
-        ].into_iter().flat_map(|(size_opt, chance)| {
-            size_opt.into_iter().flat_map(move |size| {
-                size.permutations().into_iter().map(move |s| (s, chance))
-            })
-        }).collect();
+        let generator = GeneratorStrategy {
+            room_chances: vec![
+                (RoomSize::new(5,4), 1),
+                (RoomSize::new(4,4), 2),
+                (RoomSize::new(4,3), 3),
+                (RoomSize::new(4,2), 3),
+                (RoomSize::new(4,1), 1),
+                (RoomSize::new(3,2), 5),
+                (RoomSize::new(3,1), 2),
+                (RoomSize::new(2,2), 5),
+                (RoomSize::new(2,1), 1),
+                (RoomSize::new(1,1), 1)
+            ].into_iter().flat_map(|(size_opt, chance)| {
+                size_opt.map(|s| (s, chance))
+            }).collect(),
+            bias_graph: BiasGraph::new(
+                &vec![
+                    ("start", (0.0, 0.0)),
+                    ("upper-left", (0.25, 0.75)),
+                    ("lower-right", (0.75, 0.25)),
+                    ("end", (1.0, 1.0))
+                ],
+                &vec![
+                    ("start", "upper-left"),
+                    ("upper-left", "lower-right"),
+                    ("lower-right", "end"),
+                    ("start", "lower-right"),
+                    ("upper-left", "end")
+                ]
+            ),
+            steps: vec![
+                GeneratorStep::Branches { count: 15 },
+                GeneratorStep::Clusters { count: 10, iterations: 50 },
+                GeneratorStep::Widen { iterations: 150 },
+            ]
+        };
         World {
             tile_pixel_size: 16,
             dungeon: None,
-            generator: Box::new(RandomRoomGridDungeonGenerator::new(room_chances))
+            generator
         }
     }
 
@@ -207,34 +228,7 @@ impl World {
         let grid_width = pixel_bounds.width() as usize / self.tile_pixel_size;
         let grid_height = pixel_bounds.height() as usize / self.tile_pixel_size;
         let dungeon = self.generator.generate(grid_width, grid_height);
-
-        // a diamond pattern with the points near the corners of the grid
-        let bias_graph = BiasGraph::new(
-            &vec![
-                ("start", (0.0, 0.0)),
-                ("upper-left", (0.25, 0.75)),
-                ("lower-right", (0.75, 0.25)),
-                ("end", (1.0, 1.0))
-            ],
-            &vec![
-                ("start", "upper-left"),
-                ("upper-left", "lower-right"),
-                ("lower-right", "end"),
-                ("start", "lower-right"),
-                ("upper-left", "end")
-            ]
-        );
-
-        let mut graph = GridDungeonGraph::from(dungeon);
-
-        graph.connect_bias_paths(&bias_graph);
-        graph.random_branching_grow(15);
-        graph.dfs_grow_path(5, 50);
-        graph.bfs_grow_path(100);
-
-        graph.remove_unconnected_rooms();
-        graph.insert_doors();
-        self.dungeon = Some(graph.take());
+        self.dungeon = Some(dungeon);
     }
 
     fn tile_pixel_size(&self) -> usize { self.tile_pixel_size }

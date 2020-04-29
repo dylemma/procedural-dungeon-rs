@@ -232,7 +232,6 @@ impl <'a, T> Iterator for GridTilesIterMut<'a, T> {
 
 pub struct GridWalls<T> {
     grid_width: usize,
-    grid_height: usize,
     north_walls: Vec<T>,
     east_walls: Vec<T>,
     south_walls: Vec<T>,
@@ -243,7 +242,6 @@ impl<T: Default + Clone> GridWalls<T> {
     pub fn new(grid_width: usize, grid_height: usize) -> Self {
         GridWalls {
             grid_width,
-            grid_height,
             north_walls: vec![Default::default(); grid_width * grid_height],
             east_walls: vec![Default::default(); grid_width * grid_height],
             south_walls: vec![Default::default(); grid_width],

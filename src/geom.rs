@@ -29,7 +29,6 @@ impl Rect {
     pub fn lower_left(&self) -> (i32, i32) { (self.x_min, self.y_min) }
     pub fn upper_right(&self) -> (i32, i32) { (self.x_max, self.y_max) }
     pub fn area(&self) -> i32 { self.width() * self.height() }
-    // pub fn intersects(&self, that: &RectU32)
 
     pub fn slice_away(&self, hole: &Rect) -> RectSliceAway {
         let mut tiles: Vec<Rect> = Vec::new();
@@ -178,7 +177,6 @@ impl <T> VecDrain<T>
         }
     }
 }
-
 
 fn weld(a: &Rect, b: &Rect) -> Option<Rect> {
     weld_h(a, b).or_else(|| {

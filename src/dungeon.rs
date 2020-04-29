@@ -96,11 +96,11 @@ pub trait GridDungeonGenerator<R, W = WallType> {
 pub struct RoomId(usize);
 
 pub struct RandomRoomGridDungeonGenerator {
-    room_chances: Vec<(RoomSize, usize)>
+    room_chances: Vec<(RoomSize, u32)>
 }
 
 impl RandomRoomGridDungeonGenerator {
-    pub fn new(room_chances: Vec<(RoomSize, usize)>) -> Self {
+    pub fn new(room_chances: Vec<(RoomSize, u32)>) -> Self {
         RandomRoomGridDungeonGenerator {
             room_chances
         }
@@ -109,7 +109,7 @@ impl RandomRoomGridDungeonGenerator {
 
 fn random_room_placement<R, F>(
     target_tile: &TileAddress,
-    room_chances: &Vec<(RoomSize, usize)>,
+    room_chances: &Vec<(RoomSize, u32)>,
     rng: &mut R,
     is_unoccupied: F,
 ) -> Option<(RoomSize, TileAddress)>
@@ -117,7 +117,7 @@ fn random_room_placement<R, F>(
         R: Rng,
         F: Fn(&TileAddress) -> bool + Copy
 {
-    let (possible_placements, placement_weights): (Vec<(RoomSize, TileAddress)>, Vec<usize>) = room_chances.iter()
+    let (possible_placements, placement_weights): (Vec<(RoomSize, TileAddress)>, Vec<u32>) = room_chances.iter()
         .flat_map(|(room, chance)| {
             let TileAddress { x, y } = *target_tile;
             (0..room.width()).flat_map(move |dx| {
@@ -484,7 +484,7 @@ impl GridDungeonGraph {
         }
     }
 
-    pub fn random_branching_grow(&mut self, num_endpoints: usize) {
+    pub fn random_branching_grow(&mut self, num_endpoints: u32) {
         // identify the "main path" of pre-connected rooms
         let preconnected: HashSet<RoomId> = self.edge_data.iter()
             .flat_map(|(rooms, edge_state)| {
@@ -555,7 +555,7 @@ impl GridDungeonGraph {
         }
     }
 
-    pub fn dfs_grow_path(&mut self, num_seeds: usize, mut iterations: u32) {
+    pub fn dfs_grow_path(&mut self, num_seeds: u32, mut iterations: u32) {
         // create a vector of the rooms that are "connected" via an EdgeState::Connected edge touching them.
         // avoid adding duplicate entries to the `frontier` by also tracking `seen` rooms
         let mut connected = HashSet::new();
@@ -579,7 +579,7 @@ impl GridDungeonGraph {
 
         // replace the "frontier" with a subset of the frontier rooms
         let mut rng = thread_rng();
-        frontier = frontier.choose_multiple(&mut rng, num_seeds).cloned().collect();
+        frontier = frontier.choose_multiple(&mut rng, num_seeds as usize).cloned().collect();
 
         while iterations > 0 && !frontier.is_empty() {
             iterations -= 1;
@@ -725,5 +725,54 @@ impl GridDungeonGraph {
             let wall = walls[rng.gen_range(0, walls.len())];
             self.dungeon.walls[wall] = WallType::Door;
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum GeneratorStep {
+    Branches { count: u32 },
+    Widen { iterations: u32 },
+    Clusters { count: u32, iterations: u32 }
+}
+
+pub struct GeneratorStrategy<ID> {
+    pub room_chances: Vec<(RoomSize, u32)>,
+    pub bias_graph: BiasGraph<ID>,
+    pub steps: Vec<GeneratorStep>
+}
+impl <ID: Eq + Hash + Copy> GeneratorStrategy<ID> {
+    pub fn generate(&self, grid_width: usize, grid_height: usize) -> BasicGridDungeon {
+        let permuted_room_chances = self.room_chances.iter().flat_map(|&(size, chance)| {
+            let RoomSize(w, h) = size;
+            if w == h {
+                vec![(size, chance)]
+            } else if chance % 2 == 0 {
+                let c2 = chance / 2;
+                vec![(size, c2), (RoomSize(h, w), c2)]
+            } else {
+                let c1 = chance / 2;
+                let c2 = c1 + 1;
+                vec![(size, c1), (RoomSize(h, w), c2)]
+            }
+        }).collect();
+
+        let mut base_generator = RandomRoomGridDungeonGenerator::new(permuted_room_chances);
+        let grid = base_generator.generate(grid_width, grid_height);
+        let mut graph = GridDungeonGraph::from(grid);
+
+        graph.connect_bias_paths(&self.bias_graph);
+
+        for step in &self.steps {
+            println!("generator step: {:?}", step);
+            match *step {
+                GeneratorStep::Branches { count } => graph.random_branching_grow(count),
+                GeneratorStep::Clusters { count, iterations } => graph.dfs_grow_path(count, iterations),
+                GeneratorStep::Widen { iterations } => graph.bfs_grow_path(iterations),
+            }
+        }
+
+        graph.remove_unconnected_rooms();
+        graph.insert_doors();
+        graph.take()
     }
 }
