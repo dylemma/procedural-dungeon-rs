@@ -217,7 +217,7 @@ impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenera
 }
 
 
-trait Sliding<I, T> {
+pub trait Sliding<I, T> {
     fn sliding(self) -> SlidingIter<I, T>;
 }
 
@@ -234,7 +234,7 @@ impl<S, T, I> Sliding<I, T> for S
     }
 }
 
-struct SlidingIter<I, T> {
+pub struct SlidingIter<I, T> {
     current: Option<T>,
     iter: I,
 }
@@ -256,7 +256,7 @@ impl<I, T> Iterator for SlidingIter<I, T>
     }
 }
 
-type BasicGridDungeon = GridDungeon<Option<(RoomId, f32)>>;
+pub type BasicGridDungeon = GridDungeon<Option<(RoomId, f32)>>;
 type RoomIdPair = UnorderedPair<RoomId>;
 
 #[derive(Eq, PartialEq)]

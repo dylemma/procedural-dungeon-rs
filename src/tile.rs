@@ -232,6 +232,7 @@ impl <'a, T> Iterator for GridTilesIterMut<'a, T> {
 
 pub struct GridWalls<T> {
     grid_width: usize,
+    grid_height: usize,
     north_walls: Vec<T>,
     east_walls: Vec<T>,
     south_walls: Vec<T>,
@@ -242,6 +243,7 @@ impl<T: Default + Clone> GridWalls<T> {
     pub fn new(grid_width: usize, grid_height: usize) -> Self {
         GridWalls {
             grid_width,
+            grid_height,
             north_walls: vec![Default::default(); grid_width * grid_height],
             east_walls: vec![Default::default(); grid_width * grid_height],
             south_walls: vec![Default::default(); grid_width],
@@ -281,6 +283,7 @@ impl<T> Index<WallAddress> for GridWalls<T> {
 
     fn index(&self, index: WallAddress) -> &Self::Output {
         let TileAddress { x, y } = index.tile;
+        if x >= self.grid_width || y >= self.grid_height { panic!("WallAddress out of bounds for grid ({},{}) vs ({}, {})", x,y, self.grid_width, self.grid_height) }
         match index.direction {
             CompassDirection::North => &self.north_walls[x + y * self.grid_width],
             CompassDirection::East => &self.east_walls[x + y * self.grid_width],
