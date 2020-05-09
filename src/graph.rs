@@ -4,9 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Add, Deref, Index};
 
 use graphics::math::Scalar;
-use nalgebra::distance;
 use ncollide2d::bounding_volume::{AABB, BoundingVolume};
-use ncollide2d::math::{Isometry, Point};
+use ncollide2d::math::{Isometry, Point as NaPoint};
 use ncollide2d::partitioning::*;
 use ncollide2d::partitioning::BVH;
 use ncollide2d::query::PointQuery;
@@ -14,8 +13,10 @@ use ncollide2d::query::visitors::PointInterferencesCollector;
 use num::Zero;
 use pathfinding::directed::astar::astar;
 use unordered_pair::UnorderedPair;
+use vecmath::{vec2_len, vec2_sub, Vector2};
 
 use crate::dungeon::*;
+use crate::geom::Point;
 use crate::tile::{CompassDirection, TileAddress, WallAddress, WallType};
 use crate::tile::WallType::Wall;
 
@@ -35,8 +36,8 @@ pub fn decompose(dungeon: &BasicGridDungeon, tile_size: f64, wall_margin: f64, d
                 tiles_within_corners(southwest, northeast, |t| { seen_tiles.insert(t); });
 
                 // create an AABB of the room and insert it into our DBVT
-                let southwest_point = Point::new(southwest.x as f64 * tile_size, southwest.y as f64 * tile_size);
-                let northeast_point = Point::new((northeast.x + 1) as f64 * tile_size, (northeast.y + 1) as f64 * tile_size);
+                let southwest_point = NaPoint::new(southwest.x as f64 * tile_size, southwest.y as f64 * tile_size);
+                let northeast_point = NaPoint::new((northeast.x + 1) as f64 * tile_size, (northeast.y + 1) as f64 * tile_size);
                 let aabb = AABB::new(southwest_point, northeast_point).tightened(wall_margin);
 
                 let room_handle = graph.insert_with(aabb, |id, bvid| {
@@ -77,6 +78,13 @@ pub fn decompose(dungeon: &BasicGridDungeon, tile_size: f64, wall_margin: f64, d
     }
 
     graph
+}
+
+fn from_na_point(p: &NaPoint<f64>) -> Point {
+    [p.x, p.y]
+}
+fn to_na_point(p: &Point) -> NaPoint<f64> {
+    NaPoint::new(p[0], p[1])
 }
 
 #[derive(Ord, PartialOrd, PartialEq, Eq, Hash, Debug, Copy, Clone)]
@@ -171,33 +179,34 @@ impl DungeonFloorGraph {
         &self.bvt.get(*bvid).unwrap().bounding_volume
     }
 
-    pub fn node_at_point(&self, point: &Point<f64>) -> Option<&FloorNode> {
+    pub fn node_at_point(&self, point: &Point) -> Option<&FloorNode> {
         let mut result = None;
         {
-            let mut visitor = FirstInterferenceAtPointFinder { point, result: &mut result };
+            let na_point: NaPoint<f64> = to_na_point(point);
+            let mut visitor = FirstInterferenceAtPointFinder { point: &na_point, result: &mut result };
             self.bvt.visit(&mut visitor);
         }
         result.and_then(|id| { self.get(id) })
     }
 
-    pub fn nodes(&self) -> std::slice::Iter<FloorNode> {
-        self.nodes.iter()
+    pub fn nodes(&self) -> &Vec<FloorNode> {
+        &self.nodes
     }
 
-    pub fn find_route(&self, from: &Point<f64>, to: &Point<f64>) -> Option<Vec<Point<f64>>> {
+    pub fn find_route(&self, from: &Point, to: &Point) -> Option<Vec<Point>> {
         let start_node = self.node_at_point(from)?;
         let goal_node = self.node_at_point(to)?;
 
         let u = |dist: f64| (dist * 10000f64) as u32;
 
         if start_node.id() == goal_node.id() {
-            return Some(vec![*from, *to]);
+            return Some(vec![*to]);
         }
 
         let point_in = |node_id: &FloorNodeId| {
             if node_id == start_node.id() { *from }
             else if node_id == goal_node.id() { *to }
-            else { self.get_bounds(*node_id).center() }
+            else { from_na_point(&self.get_bounds(*node_id).center()) }
         };
         let goal_point = point_in(goal_node.id());
         let (path, _total_cost) = astar(
@@ -205,25 +214,35 @@ impl DungeonFloorGraph {
             |node_id| {
                 let current_center = point_in(node_id);
                 self.adjacencies_of(*node_id).iter().map(move |(neighbor, _gate)| {
-                    let dist: f64 = distance(&current_center, &point_in(neighbor));
+                    let dist = vec2_len(vec2_sub(point_in(neighbor), current_center));
                     (*neighbor, u(dist))
                 })
             },
             |node_id| {
                 let current_point = point_in(node_id);
-                let dist: f64 = distance(&current_point, &goal_point);
+                let dist = vec2_len(vec2_sub(goal_point, current_point));
                 u(dist)
             },
             |node_id| node_id == goal_node.id()
         )?;
 
-        let points: Vec<Point<f64>> = path.iter().map(point_in).collect();
+        // the path is a Vec whose items are NodeIds...
+        // now compute a path of Points by aiming for the middle of each PathGate on the borders between Nodes,
+        // and finish off the path with the goal point which is found inside the final Node
+        let mut points: Vec<Point> = Vec::with_capacity(path.len() - 1);
+        for (current, next) in path.iter().sliding() {
+            let gate: &PathGate = self.adj[current.0].get(next)?;
+            points.push(gate.center());
+        }
+        points.push(goal_point);
+
+        // let points: Vec<_> = path.iter().map(point_in).collect();
         Some(points)
     }
 }
 
 struct FirstInterferenceAtPointFinder<'a, T: 'a> {
-    point: &'a Point<f64>,
+    point: &'a NaPoint<f64>,
     result: &'a mut Option<T>
 }
 impl<'a, T, BV> Visitor<T, BV> for FirstInterferenceAtPointFinder<'a, T>
@@ -248,11 +267,11 @@ where
 
 #[derive(PartialEq, Clone)]
 pub struct PathGate {
-    left: Point<f64>,
-    right: Point<f64>,
+    left: Point,
+    right: Point,
 }
 impl PathGate {
-    pub fn new(left: Point<f64>, right: Point<f64>) -> Self {
+    pub fn new(left: Point, right: Point) -> Self {
         PathGate { left, right }
     }
     pub fn swapped(&self) -> Self {
@@ -260,6 +279,11 @@ impl PathGate {
             left: self.right.clone(),
             right: self.left.clone(),
         }
+    }
+    pub fn center(&self) -> Point {
+        let [x1, y1] = self.left;
+        let [x2, y2] = self.right;
+        [x1 + (x2 - x1) / 2.0, y1 + (y2 - y1) / 2.0]
     }
 }
 
@@ -344,33 +368,33 @@ fn door_aabb(door: &WallAddress, tile_size: f64, wall_margin: f64, door_width: f
 
     match door.direction() {
         CompassDirection::West => AABB::new(
-            Point::new(x - wall_margin, y + tile_half_width - door_half_width),
-            Point::new(x + wall_margin, y + tile_half_width + door_half_width)
+            NaPoint::new(x - wall_margin, y + tile_half_width - door_half_width),
+            NaPoint::new(x + wall_margin, y + tile_half_width + door_half_width)
         ),
         CompassDirection::East => AABB::new(
-            Point::new(x + tile_size - wall_margin, y + tile_half_width - door_half_width),
-            Point::new(x + tile_size + wall_margin, y + tile_half_width + door_half_width),
+            NaPoint::new(x + tile_size - wall_margin, y + tile_half_width - door_half_width),
+            NaPoint::new(x + tile_size + wall_margin, y + tile_half_width + door_half_width),
         ),
         CompassDirection::South => AABB::new(
-            Point::new(x + tile_half_width - door_half_width, y - wall_margin),
-            Point::new(x + tile_half_width + door_half_width, y + wall_margin)
+            NaPoint::new(x + tile_half_width - door_half_width, y - wall_margin),
+            NaPoint::new(x + tile_half_width + door_half_width, y + wall_margin)
         ),
         CompassDirection::North => AABB::new(
-            Point::new(x + tile_half_width - door_half_width, y + tile_size - wall_margin),
-            Point::new(x + tile_half_width + door_half_width, y + tile_size + wall_margin)
+            NaPoint::new(x + tile_half_width - door_half_width, y + tile_size - wall_margin),
+            NaPoint::new(x + tile_half_width + door_half_width, y + tile_size + wall_margin)
         )
     }
 }
 
-fn aabb_edge(bb: &AABB<f64>, dir: &CompassDirection) -> (Point<f64>, Point<f64>) {
+fn aabb_edge(bb: &AABB<f64>, dir: &CompassDirection) -> (Point, Point) {
     let min_x = bb.mins().x;
     let min_y = bb.mins().y;
     let max_x = bb.maxs().x;
     let max_y = bb.maxs().y;
     match *dir {
-        CompassDirection::North => (Point::new(min_x, max_y), Point::new(max_x, max_y)),
-        CompassDirection::East => (Point::new(max_x, max_y), Point::new(max_x, min_y)),
-        CompassDirection::South => (Point::new(max_x, min_y), Point::new(min_x, min_y)),
-        CompassDirection::West => (Point::new(min_x, min_y), Point::new(min_x, max_y)),
+        CompassDirection::North => ([min_x, max_y], [max_x, max_y]),
+        CompassDirection::East => ([max_x, max_y], [max_x, min_y]),
+        CompassDirection::South => ([max_x, min_y], [min_x, min_y]),
+        CompassDirection::West => ([min_x, min_y], [min_x, max_y]),
     }
 }

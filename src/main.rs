@@ -7,9 +7,7 @@ use graphics::character::CharacterCache;
 use graphics::color::{BLACK, WHITE};
 use graphics::math::{identity, Matrix2d, Vec2d};
 use graphics::types::Color;
-use nalgebra::Point2;
 use ncollide2d::bounding_volume::AABB;
-use ncollide2d::math::Point;
 use ncollide2d::partitioning::BVH;
 use ncollide2d::query::visitors::PointInterferencesCollector;
 use opengl_graphics::{GlGraphics, OpenGL};
@@ -17,6 +15,8 @@ use piston::event_loop::{Events, EventSettings};
 use piston::input::*;
 use piston::window::{AdvancedWindow, Size, Window, WindowSettings};
 use rand::{Rng, thread_rng};
+use rand::seq::SliceRandom;
+use vecmath::*;
 
 #[allow(unused)]
 use crate::dungeon::{GridDungeon, GridDungeonGenerator, RandomRoomGridDungeonGenerator, RoomId, RoomSize};
@@ -24,6 +24,7 @@ use crate::dungeon::{BasicGridDungeon, BiasGraph, GeneratorStep, GeneratorStrate
 use crate::geom::{Corners, Rect};
 use crate::graph::{DungeonFloorGraph, FloorNode, FloorNodeId};
 use crate::tile::{CompassDirection, TileAddress, WallType};
+use graphics::ellipse::circle;
 
 
 mod dungeon;
@@ -32,6 +33,7 @@ mod graph;
 mod tile;
 
 const CURSOR_COLOR: Color = BLACK;
+const PATH_COLOR: Color = [0.0, 0.0, 0.0, 0.75];
 
 const BACKGROUND_COLOR: Color = [0.4, 0.4, 0.4, 1.0];
 const WALKABLE_ROOM_COLOR: Color = [0.1, 0.6, 1.0, 0.5];
@@ -45,6 +47,8 @@ const DEBUG_WALL_COLOR: Color = BLACK;
 
 const WEIGHT_ROOM_LOW: Color = [0.1, 0.9, 0.2, 1.0];
 const WEIGHT_ROOM_HIGH: Color = [1.0, 0.1, 0.1, 1.0];
+
+type Point = vecmath::Vector2<f64>;
 
 fn main() {
 
@@ -61,14 +65,25 @@ fn main() {
     let mut app = App::new(opengl);
 
     while let Some(e) = events.next(&mut window) {
+
         e.render(|args| {
             app.render(args);
         });
 
         e.update(|args| {
+
             if app.generate_requested {
                 let Size { width, height } = window.size();
                 app.regenerate(width as i32, height as i32);
+            }
+
+            app.process_nav_request();
+
+            // make player follow the path
+            if let Some(nav) = &mut app.nav {
+                if let Some(pos) = &mut app.player_pos {
+                    nav.advance_by(500.0 * args.dt, pos);
+                }
             }
         });
 
@@ -82,23 +97,80 @@ fn main() {
             }
 
             if let Button::Mouse(MouseButton::Left) = button {
-                let [x, y] = app.cursor;
-                let click_point = Point::new(x, y);
-                if let Some(prev_click) = app.prior_click.replace(click_point) {
-                    if let Some(graph) = &app.world.floor_graph {
-                        app.route = graph.find_route(&prev_click, &click_point);
-                    }
-                }
+                app.mouse_pressed = true;
+                app.nav_requested = true;
+            }
+        });
+
+        e.release(|button| {
+            if let Button::Mouse(MouseButton::Left) = button {
+                app.mouse_pressed = false;
             }
         });
 
         e.mouse_cursor(|pos| {
-            app.update_pointer(Some(&pos), None);
+            if app.update_pointer(Some(&pos), None) {
+                if app.mouse_pressed {
+                    app.nav_requested = true;
+                }
+            }
         });
         e.mouse_relative(|change| {
             // TODO: only do this if the cursor is "captured"
-            // app.update_pointer(None, Some(&change));
+            // if app.update_pointer(None, Some(&change)) { app.route_requested = true; }
         });
+    }
+}
+
+struct Nav {
+    waypoints: Vec<Point>,
+    progress: usize,
+}
+impl Nav {
+    fn new(waypoints: Vec<Point>) -> Self {
+        Nav { waypoints, progress: 0 }
+    }
+    fn waypoints(&self) -> &Vec<Point> {
+        &self.waypoints
+    }
+    fn progress(&self) -> usize {
+        self.progress
+    }
+    fn current_target(&self) -> Option<&Point> {
+        self.waypoints.get(self.progress)
+    }
+
+    fn is_complete(&self) -> bool {
+        self.progress >= self.waypoints.len()
+    }
+
+    /// Modify `pos` by moving it `step` units towards the next waypoint, or no-op if navigation is complete.
+    /// Returns `true` to indicate navigation is complete, or `false` to indicate there is further movement to do.
+    fn advance_by(&mut self, step: f64, pos: &mut Point) -> bool {
+        if let Some(&target) = self.current_target() {
+            let to_target = vec2_sub(target, *pos);
+            let dist = vec2_len(to_target);
+
+
+            if dist < step {
+                // `pos` has reached the current target, so we can update the `progress`,
+                // then recurse to spend the remaining `step` to progress to the next waypoint
+                *pos = target;
+                self.progress += 1;
+                self.advance_by(step - dist, pos)
+            } else {
+                // move as far as the player can in the direction of the target; this should end the loop
+                let movement = vec2_scale(to_target, step / dist);
+                pos[0] += movement[0];
+                pos[1] += movement[1];
+
+                // Navigation is not yet complete
+                false
+            }
+        } else {
+            // Navigation is complete
+            true
+        }
     }
 }
 
@@ -106,10 +178,12 @@ struct App {
     gl: GlGraphics,
     world: World,
     cursor: [f64; 2],
+    player_pos: Option<[f64; 2]>,
+    mouse_pressed: bool,
     generate_requested: bool,
     pointed_room: Option<FloorNodeId>,
-    prior_click: Option<Point<f64>>,
-    route: Option<Vec<Point<f64>>>,
+    nav_requested: bool,
+    nav: Option<Nav>,
 }
 impl App {
     fn new(opengl: OpenGL) -> Self {
@@ -117,10 +191,12 @@ impl App {
             gl: GlGraphics::new(opengl),
             world: World::new(),
             cursor: [0.0; 2],
+            player_pos: None,
+            mouse_pressed: false,
             generate_requested: true,
             pointed_room: None,
-            prior_click: None,
-            route: None,
+            nav_requested: false,
+            nav: None,
         }
     }
 
@@ -129,7 +205,8 @@ impl App {
 
         let world = &self.world;
         let pointed_room = &self.pointed_room;
-        let route = &self.route;
+        let nav_opt = &self.nav;
+        let player_pos = &self.player_pos;
 
         &self.gl.draw(args.viewport(), |c, gl| {
 
@@ -192,7 +269,7 @@ impl App {
             // NAVIGATION-related debug
             if let Some(floor_graph) = &world.floor_graph {
                 // DEBUG: walkable areas
-                for node in floor_graph.nodes() {
+                for node in floor_graph.nodes().iter() {
                     let bounds = &floor_graph.get_bounds(*node.id());
 
                     let color = match node {
@@ -211,12 +288,11 @@ impl App {
                 }
             }
 
-            if let Some(route) = route {
-                for (from, to) in route.iter().sliding() {
-
-                    line_from_to(BLACK, 0.5, [from.x, from.y], [to.x, to.y], c.transform, gl);
+            if let Some(nav) = nav_opt {
+                let lines = player_pos.iter().chain(nav.waypoints().iter().skip(nav.progress)).sliding();
+                for (from, to) in lines {
+                    line_from_to(PATH_COLOR, 1.0, *from, *to, c.transform, gl);
                 }
-                // line_from_to(BLACK, 0.5, )
             }
 
             // DEBUG: cursor
@@ -227,10 +303,16 @@ impl App {
                 rectangle(CURSOR_COLOR, vertical, c.transform, gl);
                 rectangle(CURSOR_COLOR, horizontal, c.transform, gl);
             }*/
+
+            if let Some([x, y]) = player_pos {
+                let player = circle(*x, *y, 3.0);
+                ellipse(CURSOR_COLOR, player, c.transform, gl);
+            }
         });
     }
 
-    fn update_pointer(&mut self, abs: Option<&[f64; 2]>, rel: Option<&[f64; 2]>) {
+    // updates the app's knowledge of the mouse cursor, returning `true` if the cursor position has changed since last time
+    fn update_pointer(&mut self, abs: Option<&[f64; 2]>, rel: Option<&[f64; 2]>) -> bool {
         let mut changed = false;
         let [cx, cy] = &mut self.cursor;
         if let Some([x, y]) = abs {
@@ -255,6 +337,19 @@ impl App {
                 self.pointed_room = graph.node_at_point(&Point::from(self.cursor)).map(|node| *node.id());
             }
         }
+
+        changed
+    }
+
+    fn process_nav_request(&mut self) {
+        if self.nav_requested {
+            self.nav_requested = false;
+            if let Some(player_pos) = &self.player_pos {
+                self.nav = self.world.floor_graph.as_ref()
+                    .and_then(|graph| graph.find_route(player_pos, &self.cursor))
+                    .map(|route| Nav::new(route));
+            }
+        }
     }
 
     fn regenerate(&mut self, width: i32, height: i32) {
@@ -262,14 +357,23 @@ impl App {
         self.world.regenerate(Rect::from_xywh(0, 0, width, height));
 
         // reset any app state that depends on the previous "world"
-        self.route = None;
+        self.nav = None;
         self.pointed_room = None;
-        self.prior_click = None;
+        // self.prior_click = None;
         self.generate_requested = false;
 
         // the current cursor position might be pointing to a room in the new world
         let cursor = &self.cursor.clone();
         self.update_pointer(Some(cursor), None);
+
+        // pick a random position for the player
+        if let Some(graph) = &self.world.floor_graph {
+            let mut rng = thread_rng();
+            self.player_pos = graph.nodes().choose(&mut rng).map(|n| {
+                let point = graph.get_bounds(*n.id()).center();
+                [point.x, point.y]
+            });
+        }
     }
 }
 
@@ -341,6 +445,9 @@ impl World {
                 GeneratorStep::Branches { count: 15 },
                 GeneratorStep::Clusters { count: 10, iterations: 50 },
                 GeneratorStep::Widen { iterations: 150 },
+                // GeneratorStep::Branches { count: 5 },
+                // GeneratorStep::Clusters { count: 3, iterations: 20 },
+                // GeneratorStep::Widen { iterations: 20 },
             ]
         };
         World {
@@ -356,6 +463,7 @@ impl World {
         let grid_height = pixel_bounds.height() as usize / self.tile_pixel_size;
         let dungeon = self.generator.generate(grid_width, grid_height);
         self.floor_graph = Some(graph::decompose(&dungeon, self.tile_pixel_size as f64, 2.0, 6.0));
+        // self.floor_graph = Some(graph::decompose(&dungeon, self.tile_pixel_size as f64, 5.0, 20.0));
         self.dungeon = Some(dungeon);
     }
 

@@ -1324,6 +1324,7 @@ dependencies = [
  "pistoncore-glutin_window",
  "rand",
  "unordered-pair",
+ "vecmath",
 ]
 
 [[package]]

@@ -1,6 +1,10 @@
 use std::cmp::{max, Ordering};
 
 use rand::Rng;
+use vecmath;
+
+pub type Point = vecmath::Vector2<f64>;
+pub type Pixel = vecmath::Vector2<u32>;
 
 pub struct Corners<T>(pub (T, T), pub (T, T));
 
