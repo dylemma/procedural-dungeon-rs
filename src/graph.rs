@@ -1,25 +1,31 @@
-use crate::dungeon::*;
-use crate::tile::{TileAddress, CompassDirection, WallAddress, WallType};
-
-use ncollide2d::partitioning::*;
-
+use std::any::Any;
 use std::cmp::{max, min, Ordering};
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
+use std::ops::{Add, Deref, Index};
+
+use graphics::math::Scalar;
+use nalgebra::distance;
 use ncollide2d::bounding_volume::{AABB, BoundingVolume};
-use ncollide2d::math::Point;
-use std::ops::Index;
-use crate::tile::WallType::Wall;
+use ncollide2d::math::{Isometry, Point};
+use ncollide2d::partitioning::*;
+use ncollide2d::partitioning::BVH;
+use ncollide2d::query::PointQuery;
+use ncollide2d::query::visitors::PointInterferencesCollector;
+use num::Zero;
+use pathfinding::directed::astar::astar;
 use unordered_pair::UnorderedPair;
+
+use crate::dungeon::*;
+use crate::tile::{CompassDirection, TileAddress, WallAddress, WallType};
+use crate::tile::WallType::Wall;
 
 pub fn decompose(dungeon: &BasicGridDungeon, tile_size: f64, wall_margin: f64, door_width: f64) -> DungeonFloorGraph {
     assert!(door_width + wall_margin < tile_size, "doors and walls must be able to fit in a tile");
 
     let mut seen_tiles: HashSet<TileAddress> = HashSet::new();
-    let mut seen_doors: HashMap<WallAddress, DBVTLeafId> = HashMap::new();
-    let mut dbvt = DBVT::new();
+    let mut seen_doors: HashMap<WallAddress, FloorNodeId> = HashMap::new();
 
-    let mut graph_nodes: HashSet<DBVTLeafId> = HashSet::new();
-    let mut graph_adjacency: HashMap<DBVTLeafId, HashSet<DBVTLeafId>> = HashMap::new();
+    let mut graph = DungeonFloorGraph::new();
 
     let room_tiles_itr = dungeon.tiles().iter().filter(|(_, data)| data.is_some()).map(|(tile, _)| tile);
     for tile in room_tiles_itr {
@@ -32,56 +38,228 @@ pub fn decompose(dungeon: &BasicGridDungeon, tile_size: f64, wall_margin: f64, d
                 let southwest_point = Point::new(southwest.x as f64 * tile_size, southwest.y as f64 * tile_size);
                 let northeast_point = Point::new((northeast.x + 1) as f64 * tile_size, (northeast.y + 1) as f64 * tile_size);
                 let aabb = AABB::new(southwest_point, northeast_point).tightened(wall_margin);
-                let data = AabbData::Room {
-                    room_id,
-                    grid_corners: [southwest, northeast],
-                    world_bounds: aabb.clone(),
-                };
-                let room_handle = dbvt.insert(DBVTLeaf::new(aabb, data));
 
-                // create a "node" for our graph based on the room
-                graph_nodes.insert(room_handle);
+                let room_handle = graph.insert_with(aabb, |id, bvid| {
+                    FloorNode::Room {
+                        id,
+                        bvid,
+                        room_id,
+                        grid_corners: [southwest, northeast],
+                    }
+                });
 
-                doors_from_room(&dungeon, &(southwest, northeast), |door| {
+                doors_from_room(&dungeon, &(southwest, northeast), |door, dir| {
                     let door_handle = seen_doors.entry(*door).or_insert_with(|| {
                         let aabb = door_aabb(door, tile_size, wall_margin, door_width);
-                        let data = AabbData::Door {
-                            world_bounds: aabb.clone(),
-                        };
-                        let id = dbvt.insert(DBVTLeaf::new(aabb, data));
-                        graph_nodes.insert(id);
-                        id
+                        graph.insert_with(aabb, |id, bvid| FloorNode::Door {
+                            id,
+                            bvid,
+                            address: *door,
+                        })
                     });
+                    let door_bounds = graph.get_bounds(*door_handle);
 
-                    graph_adjacency.entry(room_handle).or_default().insert(*door_handle);
-                    graph_adjacency.entry(*door_handle).or_default().insert(room_handle);
+                    // find the edge of the door that borders with the current room.
+                    // This will be the edge that the path planning "funnel" needs to pass through.
+                    // Since the given `dir` is from the room to the door, we need to use the opposite
+                    // direction when picking which side of the room to treat as the edge.
+                    // We're trying to represent the edge as a (L, R) pair, where the first point
+                    // is on the left when viewed from the center of the room/door AABB
+                    let (left_from_door, right_from_door) = aabb_edge(door_bounds, &dir.reflect());
+                    graph.set_adjacent(
+                        *door_handle,
+                        PathGate::new(left_from_door, right_from_door),
+                        room_handle
+                    );
                 });
             }
         }
     }
 
-    DungeonFloorGraph {
-        bvt: dbvt,
-        nodes: graph_nodes,
-        adj: graph_adjacency,
+    graph
+}
+
+#[derive(Ord, PartialOrd, PartialEq, Eq, Hash, Debug, Copy, Clone)]
+pub struct FloorNodeId(usize);
+
+pub enum FloorNode {
+    Room {
+        id: FloorNodeId,
+        room_id: RoomId,
+        grid_corners: [TileAddress; 2],
+        bvid: DBVTLeafId,
+        // world_bounds: AABB<f64>,
+    },
+    Door {
+        id: FloorNodeId,
+        address: WallAddress,
+        // world_bounds: AABB<f64>,
+        bvid: DBVTLeafId,
+    }
+}
+impl FloorNode {
+    pub fn id(&self) -> &FloorNodeId {
+        match self {
+            FloorNode::Room { id, .. } => id,
+            FloorNode::Door { id, .. } => id,
+        }
+    }
+    pub fn bvid(&self) -> &DBVTLeafId {
+        match self {
+            FloorNode::Room { bvid, .. } => bvid,
+            FloorNode::Door { bvid, .. } => bvid,
+        }
     }
 }
 
 pub struct DungeonFloorGraph {
-    pub bvt: DBVT<f64, AabbData, AABB<f64>>,
-    pub nodes: HashSet<DBVTLeafId>,
-    pub adj: HashMap<DBVTLeafId, HashSet<DBVTLeafId>>
+    bvt: DBVT<f64, FloorNodeId, AABB<f64>>,
+    nodes: Vec<FloorNode>,
+    adj: Vec<HashMap<FloorNodeId, PathGate>>
+}
+impl DungeonFloorGraph {
+    pub fn new() -> Self {
+        DungeonFloorGraph::with_capacity(128)
+    }
+    pub fn with_capacity(capacity: usize) -> Self {
+        DungeonFloorGraph {
+            bvt: DBVT::new(),
+            nodes: Vec::with_capacity(capacity),
+            adj: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn insert_with<F>(&mut self, bounds: AABB<f64>, f: F) -> FloorNodeId
+        where F: FnOnce(FloorNodeId, DBVTLeafId) -> FloorNode
+    {
+        let index = self.nodes.len();
+        let id = FloorNodeId(index);
+        let bvid = self.bvt.insert(DBVTLeaf::new(bounds, id));
+        let node = f(id, bvid);
+        self.nodes.push(node);
+        self.adj.push(HashMap::new());
+        id
+    }
+
+    pub fn set_adjacent(&mut self, from: FloorNodeId, gate: PathGate, to: FloorNodeId) {
+        {
+            // add an adjacency `to => from` that that goes through the gate backwards (left/right swapped)
+            let adj_to = &mut self.adj[to.0];
+            adj_to.insert(from, gate.swapped());
+        }
+        {
+            // add an adjacency `from => to` that goes through the gate as given
+            let adj_from = &mut self.adj[from.0];
+            adj_from.insert(to, gate);
+        }
+    }
+
+    pub fn get(&self, id: FloorNodeId) -> Option<&FloorNode> {
+        if id.0 >= self.nodes.len() {
+            None
+        } else {
+            Some(&self.nodes[id.0])
+        }
+    }
+
+    pub fn adjacencies_of(&self, id: FloorNodeId) -> &HashMap<FloorNodeId, PathGate> {
+        &self.adj[id.0]
+    }
+
+    pub fn get_bounds(&self, id: FloorNodeId) -> &AABB<f64> {
+        let bvid = self.nodes[id.0].bvid();
+        &self.bvt.get(*bvid).unwrap().bounding_volume
+    }
+
+    pub fn node_at_point(&self, point: &Point<f64>) -> Option<&FloorNode> {
+        let mut result = None;
+        {
+            let mut visitor = FirstInterferenceAtPointFinder { point, result: &mut result };
+            self.bvt.visit(&mut visitor);
+        }
+        result.and_then(|id| { self.get(id) })
+    }
+
+    pub fn nodes(&self) -> std::slice::Iter<FloorNode> {
+        self.nodes.iter()
+    }
+
+    pub fn find_route(&self, from: &Point<f64>, to: &Point<f64>) -> Option<Vec<Point<f64>>> {
+        let start_node = self.node_at_point(from)?;
+        let goal_node = self.node_at_point(to)?;
+
+        let u = |dist: f64| (dist * 10000f64) as u32;
+
+        if start_node.id() == goal_node.id() {
+            return Some(vec![*from, *to]);
+        }
+
+        let point_in = |node_id: &FloorNodeId| {
+            if node_id == start_node.id() { *from }
+            else if node_id == goal_node.id() { *to }
+            else { self.get_bounds(*node_id).center() }
+        };
+        let goal_point = point_in(goal_node.id());
+        let (path, _total_cost) = astar(
+            start_node.id(),
+            |node_id| {
+                let current_center = point_in(node_id);
+                self.adjacencies_of(*node_id).iter().map(move |(neighbor, _gate)| {
+                    let dist: f64 = distance(&current_center, &point_in(neighbor));
+                    (*neighbor, u(dist))
+                })
+            },
+            |node_id| {
+                let current_point = point_in(node_id);
+                let dist: f64 = distance(&current_point, &goal_point);
+                u(dist)
+            },
+            |node_id| node_id == goal_node.id()
+        )?;
+
+        let points: Vec<Point<f64>> = path.iter().map(point_in).collect();
+        Some(points)
+    }
 }
 
-#[derive(Debug, Clone)]
-pub enum AabbData {
-    Room {
-        room_id: RoomId,
-        grid_corners: [TileAddress; 2],
-        world_bounds: AABB<f64>,
-    },
-    Door {
-        world_bounds: AABB<f64>
+struct FirstInterferenceAtPointFinder<'a, T: 'a> {
+    point: &'a Point<f64>,
+    result: &'a mut Option<T>
+}
+impl<'a, T, BV> Visitor<T, BV> for FirstInterferenceAtPointFinder<'a, T>
+where
+    T: Clone,
+    BV: PointQuery<f64>
+{
+    fn visit(&mut self, bv: &BV, data: Option<&T>) -> VisitStatus {
+        if bv.contains_point(&Isometry::identity(), self.point) {
+            if let Some(t) = data {
+                self.result.replace(t.clone());
+                VisitStatus::ExitEarly
+            } else {
+                VisitStatus::Continue
+            }
+        } else {
+            VisitStatus::Stop
+        }
+    }
+}
+
+
+#[derive(PartialEq, Clone)]
+pub struct PathGate {
+    left: Point<f64>,
+    right: Point<f64>,
+}
+impl PathGate {
+    pub fn new(left: Point<f64>, right: Point<f64>) -> Self {
+        PathGate { left, right }
+    }
+    pub fn swapped(&self) -> Self {
+        PathGate {
+            left: self.right.clone(),
+            right: self.left.clone(),
+        }
     }
 }
 
@@ -128,26 +306,27 @@ fn tiles_within_corners<F: FnMut(TileAddress) -> ()>(c1: TileAddress, c2: TileAd
 }
 
 fn doors_from_room<F>(dungeon: &BasicGridDungeon, room_corners: &(TileAddress, TileAddress), mut f: F)
-    where F: FnMut(&WallAddress) -> ()
+    where F: FnMut(&WallAddress, &CompassDirection) -> ()
 {
     let (c1, c2) = room_corners;
     let (min_x, max_x) = if c1.x < c2.x { (c1.x, c2.x) } else { (c2.x, c1.x ) };
     let (min_y, max_y) = if c1.y < c2.y { (c1.y, c2.y) } else { (c2.y, c1.y ) };
     let walls = dungeon.walls();
 
-    let mut try_door = |wall: WallAddress| {
-        if walls[wall] == WallType::Door { f(&wall); }
+    let mut try_door = |from: TileAddress, dir: CompassDirection| {
+        let wall = WallAddress::new(from, dir);
+        if walls[wall] == WallType::Door { f(&wall, &dir); }
     };
 
     // west+east walls
     for y in min_y..=max_y {
-        try_door(WallAddress::new(TileAddress { x: min_x, y }, CompassDirection::West));
-        try_door(WallAddress::new(TileAddress { x: max_x, y }, CompassDirection::East));
+        try_door(TileAddress { x: min_x, y }, CompassDirection::West);
+        try_door(TileAddress { x: max_x, y }, CompassDirection::East);
     }
     // south+north walls
     for x in min_x..=max_x {
-        try_door(WallAddress::new(TileAddress { x, y: min_y }, CompassDirection::South));
-        try_door(WallAddress::new(TileAddress { x, y: max_y }, CompassDirection::North));
+        try_door(TileAddress { x, y: min_y }, CompassDirection::South);
+        try_door(TileAddress { x, y: max_y }, CompassDirection::North);
     }
 }
 
@@ -180,5 +359,18 @@ fn door_aabb(door: &WallAddress, tile_size: f64, wall_margin: f64, door_width: f
             Point::new(x + tile_half_width - door_half_width, y + tile_size - wall_margin),
             Point::new(x + tile_half_width + door_half_width, y + tile_size + wall_margin)
         )
+    }
+}
+
+fn aabb_edge(bb: &AABB<f64>, dir: &CompassDirection) -> (Point<f64>, Point<f64>) {
+    let min_x = bb.mins().x;
+    let min_y = bb.mins().y;
+    let max_x = bb.maxs().x;
+    let max_y = bb.maxs().y;
+    match *dir {
+        CompassDirection::North => (Point::new(min_x, max_y), Point::new(max_x, max_y)),
+        CompassDirection::East => (Point::new(max_x, max_y), Point::new(max_x, min_y)),
+        CompassDirection::South => (Point::new(max_x, min_y), Point::new(min_x, min_y)),
+        CompassDirection::West => (Point::new(min_x, min_y), Point::new(min_x, max_y)),
     }
 }

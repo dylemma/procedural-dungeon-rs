@@ -19,6 +19,16 @@ pub enum CompassDirection {
     South,
     West,
 }
+impl CompassDirection {
+    pub fn reflect(&self) -> CompassDirection {
+        match *self {
+            CompassDirection::North => CompassDirection::South,
+            CompassDirection::South => CompassDirection::North,
+            CompassDirection::East => CompassDirection::West,
+            CompassDirection::West => CompassDirection::East,
+        }
+    }
+}
 
 impl Add<CompassDirection> for TileAddress {
     type Output = Option<TileAddress>;

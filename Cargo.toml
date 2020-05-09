@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 crow = "0.7.1"
-nalgebra = "0.21.0"
+nalgebra = "0.20.0"
 ncollide2d = "0.22.0"
 nphysics2d = "0.14.0"
 num = "0.2.1"

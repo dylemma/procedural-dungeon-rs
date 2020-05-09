@@ -1,37 +1,30 @@
-// use crow::{Context, DrawConfig, Texture, DrawTarget};
-// use crow::color::{IDENTITY, RED};
-// use crow::glutin::event::{Event, StartCause, WindowEvent};
-// use crow::glutin::event_loop::{ControlFlow, EventLoop};
-// use crow::glutin::window::WindowBuilder;
-// use crow::image::{ImageBuffer, Rgba, RgbaImage};
+use std::rc::Rc;
+use std::slice::Iter;
+
+use glutin_window::GlutinWindow;
+use graphics::{Context, line_from_to, triangulation};
+use graphics::character::CharacterCache;
+use graphics::color::{BLACK, WHITE};
+use graphics::math::{identity, Matrix2d, Vec2d};
+use graphics::types::Color;
+use nalgebra::Point2;
+use ncollide2d::bounding_volume::AABB;
+use ncollide2d::math::Point;
+use ncollide2d::partitioning::BVH;
+use ncollide2d::query::visitors::PointInterferencesCollector;
+use opengl_graphics::{GlGraphics, OpenGL};
+use piston::event_loop::{Events, EventSettings};
+use piston::input::*;
+use piston::window::{AdvancedWindow, Size, Window, WindowSettings};
 use rand::{Rng, thread_rng};
 
 #[allow(unused)]
 use crate::dungeon::{GridDungeon, GridDungeonGenerator, RandomRoomGridDungeonGenerator, RoomId, RoomSize};
+use crate::dungeon::{BasicGridDungeon, BiasGraph, GeneratorStep, GeneratorStrategy, GridDungeonGraph, Sliding, SlidingIter};
 use crate::geom::{Corners, Rect};
+use crate::graph::{DungeonFloorGraph, FloorNode, FloorNodeId};
 use crate::tile::{CompassDirection, TileAddress, WallType};
-use crate::dungeon::{GridDungeonGraph, BiasGraph, GeneratorStrategy, GeneratorStep, Sliding, SlidingIter, BasicGridDungeon};
-use crate::graph::{DungeonFloorGraph, AabbData};
-use ncollide2d::math::Point;
-use ncollide2d::query::visitors::PointInterferencesCollector;
-use ncollide2d::partitioning::BVH;
-use ncollide2d::bounding_volume::AABB;
-use std::slice::Iter;
-use std::rc::Rc;
 
-//
-use glutin_window::GlutinWindow;
-use opengl_graphics::{GlGraphics, OpenGL};
-use piston::event_loop::{EventSettings, Events};
-use piston::input::*;
-use piston::window::{Window, WindowSettings, AdvancedWindow};
-use graphics::math::{identity, Matrix2d, Vec2d};
-use graphics::{triangulation, line_from_to, Context};
-use graphics::character::CharacterCache;
-use graphics::types::Color;
-use graphics::color::{BLACK, WHITE};
-use nalgebra::Point2;
-//
 
 mod dungeon;
 mod geom;
@@ -74,11 +67,8 @@ fn main() {
 
         e.update(|args| {
             if app.generate_requested {
-                let wsize = window.size();
-                let w = wsize.width as i32;
-                let h = wsize.height as i32;
-                app.world.regenerate(Rect::from_xywh(0, 0, w, h));
-                app.generate_requested = false;
+                let Size { width, height } = window.size();
+                app.regenerate(width as i32, height as i32);
             }
         });
 
@@ -89,6 +79,16 @@ fn main() {
                     app.generate_requested = true;
                 }
                 println!("Typed key: {:?}", key);
+            }
+
+            if let Button::Mouse(MouseButton::Left) = button {
+                let [x, y] = app.cursor;
+                let click_point = Point::new(x, y);
+                if let Some(prev_click) = app.prior_click.replace(click_point) {
+                    if let Some(graph) = &app.world.floor_graph {
+                        app.route = graph.find_route(&prev_click, &click_point);
+                    }
+                }
             }
         });
 
@@ -107,8 +107,9 @@ struct App {
     world: World,
     cursor: [f64; 2],
     generate_requested: bool,
-    pointed_room: Option<AabbData>,
-    pointed_query_buf: Vec<AabbData>,
+    pointed_room: Option<FloorNodeId>,
+    prior_click: Option<Point<f64>>,
+    route: Option<Vec<Point<f64>>>,
 }
 impl App {
     fn new(opengl: OpenGL) -> Self {
@@ -118,17 +119,17 @@ impl App {
             cursor: [0.0; 2],
             generate_requested: true,
             pointed_room: None,
-            pointed_query_buf: Vec::with_capacity(8),
+            prior_click: None,
+            route: None,
         }
     }
 
     fn render(&mut self, args: &RenderArgs) {
         use graphics::*;
 
-        let self_gl = &mut self.gl;
         let world = &self.world;
         let pointed_room = &self.pointed_room;
-        let cursor = &self.cursor;
+        let route = &self.route;
 
         &self.gl.draw(args.viewport(), |c, gl| {
 
@@ -188,30 +189,34 @@ impl App {
                 }
             }
 
-            // DEBUG: walkable areas
+            // NAVIGATION-related debug
             if let Some(floor_graph) = &world.floor_graph {
-                for id in floor_graph.nodes.iter() {
-                    let leaf = &floor_graph.bvt[*id];
-                    let bounds = &leaf.bounding_volume;
-                    let data = &leaf.data;
+                // DEBUG: walkable areas
+                for node in floor_graph.nodes() {
+                    let bounds = &floor_graph.get_bounds(*node.id());
 
-                    let color = match data {
-                        AabbData::Room { .. } => WALKABLE_ROOM_COLOR,
-                        AabbData::Door { .. } => WALKABLE_DOOR_COLOR,
+                    let color = match node {
+                        FloorNode::Room { .. } => WALKABLE_ROOM_COLOR,
+                        FloorNode::Door { .. } => WALKABLE_DOOR_COLOR,
                     };
                     let rect = rectangle::rectangle_by_corners(bounds.mins().x, bounds.mins().y, bounds.maxs().x, bounds.maxs().y);
                     rectangle(color, rect, c.transform, gl);
                 }
+
+                // DEBUG: cursor target walkable area
+                if let Some(pointed_room) = pointed_room {
+                    let bounds = floor_graph.get_bounds(*pointed_room);
+                    let rect = rectangle::rectangle_by_corners(bounds.mins().x, bounds.mins().y, bounds.maxs().x, bounds.maxs().y);
+                    rectangle(POINTED_ROOM_COLOR, rect, c.transform, gl);
+                }
             }
 
-            // DEBUG: cursor target walkable area
-            if let Some(pointed_room) = pointed_room {
-                let bounds = match pointed_room {
-                    AabbData::Room { world_bounds, .. } => world_bounds,
-                    AabbData::Door { world_bounds, .. } => world_bounds,
-                };
-                let rect = rectangle::rectangle_by_corners(bounds.mins().x, bounds.mins().y, bounds.maxs().x, bounds.maxs().y);
-                rectangle(POINTED_ROOM_COLOR, rect, c.transform, gl);
+            if let Some(route) = route {
+                for (from, to) in route.iter().sliding() {
+
+                    line_from_to(BLACK, 0.5, [from.x, from.y], [to.x, to.y], c.transform, gl);
+                }
+                // line_from_to(BLACK, 0.5, )
             }
 
             // DEBUG: cursor
@@ -247,20 +252,26 @@ impl App {
 
         if changed {
             if let Some(graph) = &self.world.floor_graph {
-                let buf = &mut self.pointed_query_buf;
-                buf.clear();
-                {
-                    let point = Point::from(self.cursor);
-                    let mut visitor = PointInterferencesCollector::new(&point, buf);
-                    graph.bvt.visit(&mut visitor);
-                }
-                self.pointed_room = buf.iter().next().cloned();
+                self.pointed_room = graph.node_at_point(&Point::from(self.cursor)).map(|node| *node.id());
             }
         }
     }
-}
 
-const DOOR_COLOR: (f32, f32, f32, f32) = (0.25, 0.25, 0.25, 1.0);
+    fn regenerate(&mut self, width: i32, height: i32) {
+        // regenerate the "world"
+        self.world.regenerate(Rect::from_xywh(0, 0, width, height));
+
+        // reset any app state that depends on the previous "world"
+        self.route = None;
+        self.pointed_room = None;
+        self.prior_click = None;
+        self.generate_requested = false;
+
+        // the current cursor position might be pointing to a room in the new world
+        let cursor = &self.cursor.clone();
+        self.update_pointer(Some(cursor), None);
+    }
+}
 
 fn draw_horizontal_door(ctx: &Context, gl: &mut GlGraphics, tile_size: f64, x: f64, y: f64) {
     let pixel_pos = |xt: f64, yt: f64| { [xt * tile_size, yt * tile_size] };
