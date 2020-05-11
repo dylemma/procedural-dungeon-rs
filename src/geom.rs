@@ -6,6 +6,10 @@ use vecmath;
 pub type Point = vecmath::Vector2<f64>;
 pub type Pixel = vecmath::Vector2<u32>;
 
+pub fn point_eq<T: PartialEq>(l: &vecmath::Vector2<T>, r: &vecmath::Vector2<T>) -> bool {
+    l[0] == r[0] && l[1] == r[1]
+}
+
 pub struct Corners<T>(pub (T, T), pub (T, T));
 
 #[derive(Debug, Clone, Copy)]

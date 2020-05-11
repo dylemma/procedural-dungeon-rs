@@ -5,7 +5,8 @@ use glutin_window::GlutinWindow;
 use graphics::{Context, line_from_to, triangulation};
 use graphics::character::CharacterCache;
 use graphics::color::{BLACK, WHITE};
-use graphics::math::{identity, Matrix2d, Vec2d};
+use graphics::Transformed;
+use graphics::math::{identity, Matrix2d, Vec2d, scale, translate};
 use graphics::types::Color;
 use ncollide2d::bounding_volume::AABB;
 use ncollide2d::partitioning::BVH;
@@ -21,7 +22,7 @@ use vecmath::*;
 #[allow(unused)]
 use crate::dungeon::{GridDungeon, GridDungeonGenerator, RandomRoomGridDungeonGenerator, RoomId, RoomSize};
 use crate::dungeon::{BasicGridDungeon, BiasGraph, GeneratorStep, GeneratorStrategy, GridDungeonGraph, Sliding, SlidingIter};
-use crate::geom::{Corners, Rect};
+use crate::geom::{Corners, Point, point_eq, Rect};
 use crate::graph::{DungeonFloorGraph, FloorNode, FloorNodeId};
 use crate::tile::{CompassDirection, TileAddress, WallType};
 use graphics::ellipse::circle;
@@ -48,13 +49,12 @@ const DEBUG_WALL_COLOR: Color = BLACK;
 const WEIGHT_ROOM_LOW: Color = [0.1, 0.9, 0.2, 1.0];
 const WEIGHT_ROOM_HIGH: Color = [1.0, 0.1, 0.1, 1.0];
 
-type Point = vecmath::Vector2<f64>;
-
 fn main() {
 
     let opengl = OpenGL::V3_2;
 
-    let mut window: GlutinWindow = WindowSettings::new("Procedural Dungeon", [1024, 768])
+    let initial_screen_size = [1024, 768];
+    let mut window: GlutinWindow = WindowSettings::new("Procedural Dungeon", initial_screen_size)
         .graphics_api(opengl)
         .exit_on_esc(false) // example code used true but I don't want that
         .build()
@@ -62,29 +62,16 @@ fn main() {
 
     let mut events = Events::new(EventSettings::new());
 
-    let mut app = App::new(opengl);
+    let mut app = App::new(opengl, window);
 
-    while let Some(e) = events.next(&mut window) {
+    while let Some(e) = events.next(&mut app.window) {
 
         e.render(|args| {
             app.render(args);
         });
 
         e.update(|args| {
-
-            if app.generate_requested {
-                let Size { width, height } = window.size();
-                app.regenerate(width as i32, height as i32);
-            }
-
-            app.process_nav_request();
-
-            // make player follow the path
-            if let Some(nav) = &mut app.nav {
-                if let Some(pos) = &mut app.player_pos {
-                    nav.advance_by(500.0 * args.dt, pos);
-                }
-            }
+            app.update(args.dt);
         });
 
         // handle keyboard/button presses
@@ -109,7 +96,7 @@ fn main() {
         });
 
         e.mouse_cursor(|pos| {
-            if app.update_pointer(Some(&pos), None) {
+            if app.set_cursor(pos) {
                 if app.mouse_pressed {
                     app.nav_requested = true;
                 }
@@ -122,13 +109,40 @@ fn main() {
     }
 }
 
+struct NavController {
+    current: Option<Nav>,
+    last_goal: Option<Point>
+}
+impl NavController {
+    fn new() -> Self {
+        NavController {
+            current: None,
+            last_goal: None,
+        }
+    }
+    fn forget(&mut self) {
+        self.current = None;
+        self.last_goal = None;
+    }
+    fn update_nav(&mut self, goal: Point, player_pos: &Point, graph: &DungeonFloorGraph) {
+        let should_update = match self.last_goal {
+            Some(g) => !point_eq(&goal, &g),
+            None => true,
+        };
+        if should_update {
+            self.current = graph.find_route(player_pos, &goal).map(|route| Nav::new(route));
+            self.last_goal = Some(goal);
+        }
+    }
+}
+
 struct Nav {
     waypoints: Vec<Point>,
     progress: usize,
 }
 impl Nav {
     fn new(waypoints: Vec<Point>) -> Self {
-        Nav { waypoints, progress: 0 }
+        Nav { waypoints, progress: 0,  }
     }
     fn waypoints(&self) -> &Vec<Point> {
         &self.waypoints
@@ -176,27 +190,58 @@ impl Nav {
 
 struct App {
     gl: GlGraphics,
+    window: GlutinWindow,
     world: World,
-    cursor: [f64; 2],
-    player_pos: Option<[f64; 2]>,
+    pcc: PlayerCameraCursor,
     mouse_pressed: bool,
     generate_requested: bool,
-    pointed_room: Option<FloorNodeId>,
+    pointed_room: PointedRoom,
     nav_requested: bool,
-    nav: Option<Nav>,
+    nav: NavController,
 }
 impl App {
-    fn new(opengl: OpenGL) -> Self {
+    fn new(opengl: OpenGL, window: GlutinWindow) -> Self {
+        let screen_size = window.size().into();
         App {
             gl: GlGraphics::new(opengl),
+            window,
             world: World::new(),
-            cursor: [0.0; 2],
-            player_pos: None,
+            pcc: PlayerCameraCursor::new(screen_size),
             mouse_pressed: false,
             generate_requested: true,
-            pointed_room: None,
+            pointed_room: PointedRoom::new(),
             nav_requested: false,
-            nav: None,
+            nav: NavController::new(),
+        }
+    }
+
+    fn update(&mut self, dt: f64) {
+        // if the world needs to regenerate, do it now
+        if self.generate_requested {
+            let Size { width, height } = self.window.size();
+            self.regenerate(width as i32, height as i32);
+        }
+
+        // update the navigation target as long as the mouse is down
+        if self.mouse_pressed {
+            if let Some(graph) = &self.world.floor_graph {
+                self.nav.update_nav(self.pcc.cursor_pos, &self.pcc.player_pos, graph);
+            }
+        }
+
+        // move the player along the current navigation path
+        if let Some(nav) = &mut self.nav.current {
+            self.pcc.modify(|PccState { player_pos, .. }| {
+                nav.advance_by(200.0 * dt, player_pos);
+            });
+        }
+
+        // update the player camera/cursor if it was modified since the last update
+        self.pcc.update();
+
+        // re-check the 'pointed room' if the mouse cursor's world position has changed
+        if let Some(graph) = &self.world.floor_graph {
+            self.pointed_room.update(self.pcc.cursor_pos, graph);
         }
     }
 
@@ -204,11 +249,14 @@ impl App {
         use graphics::*;
 
         let world = &self.world;
+        let pcc = &self.pcc;
+        let player_pos = &pcc.player_pos;
+        let cursor = pcc.cursor_pos;
         let pointed_room = &self.pointed_room;
-        let nav_opt = &self.nav;
-        let player_pos = &self.player_pos;
+        let nav_opt = &self.nav.current;
 
-        &self.gl.draw(args.viewport(), |c, gl| {
+        &self.gl.draw(args.viewport(), |_c, gl| {
+            let c = _c.append_transform(pcc.camera);
 
             clear(BACKGROUND_COLOR, gl);
 
@@ -281,30 +329,32 @@ impl App {
                 }
 
                 // DEBUG: cursor target walkable area
-                if let Some(pointed_room) = pointed_room {
-                    let bounds = floor_graph.get_bounds(*pointed_room);
+                if let Some(pointed_room) = pointed_room.current {
+                    let bounds = floor_graph.get_bounds(pointed_room);
                     let rect = rectangle::rectangle_by_corners(bounds.mins().x, bounds.mins().y, bounds.maxs().x, bounds.maxs().y);
                     rectangle(POINTED_ROOM_COLOR, rect, c.transform, gl);
                 }
             }
 
             if let Some(nav) = nav_opt {
-                let lines = player_pos.iter().chain(nav.waypoints().iter().skip(nav.progress)).sliding();
+                let start = Some(player_pos.clone());
+                let lines = start.iter().chain(nav.waypoints().iter().skip(nav.progress)).sliding();
                 for (from, to) in lines {
                     line_from_to(PATH_COLOR, 1.0, *from, *to, c.transform, gl);
                 }
             }
 
             // DEBUG: cursor
-            /*{
-                let [cx, cy] = *cursor;
+            {
+                let [cx, cy] = cursor;
                 let vertical = rectangle::centered([cx, cy, 1.0, 4.0]);
                 let horizontal = rectangle::centered([cx, cy, 4.0, 1.0]);
                 rectangle(CURSOR_COLOR, vertical, c.transform, gl);
                 rectangle(CURSOR_COLOR, horizontal, c.transform, gl);
-            }*/
+            }
 
-            if let Some([x, y]) = player_pos {
+            {
+                let [x, y] = player_pos;
                 let player = circle(*x, *y, 3.0);
                 ellipse(CURSOR_COLOR, player, c.transform, gl);
             }
@@ -312,44 +362,11 @@ impl App {
     }
 
     // updates the app's knowledge of the mouse cursor, returning `true` if the cursor position has changed since last time
-    fn update_pointer(&mut self, abs: Option<&[f64; 2]>, rel: Option<&[f64; 2]>) -> bool {
-        let mut changed = false;
-        let [cx, cy] = &mut self.cursor;
-        if let Some([x, y]) = abs {
-            if x != cx || y != cy {
-                changed = true;
-                *cx = *x;
-                *cy = *y;
-            }
-        }
-
-        if let Some([dx, dy]) = rel {
-            if *dx != 0.0 || *dy != 0.0 {
-                println!("relative movement :o");
-                changed = true;
-                *cx += *dx;
-                *cy += *dy;
-            }
-        }
-
-        if changed {
-            if let Some(graph) = &self.world.floor_graph {
-                self.pointed_room = graph.node_at_point(&Point::from(self.cursor)).map(|node| *node.id());
-            }
-        }
-
-        changed
-    }
-
-    fn process_nav_request(&mut self) {
-        if self.nav_requested {
-            self.nav_requested = false;
-            if let Some(player_pos) = &self.player_pos {
-                self.nav = self.world.floor_graph.as_ref()
-                    .and_then(|graph| graph.find_route(player_pos, &self.cursor))
-                    .map(|route| Nav::new(route));
-            }
-        }
+    fn set_cursor(&mut self, cursor_screen: [f64; 2]) -> bool {
+        self.pcc.modify(|PccState { cursor_px, .. }| {
+            *cursor_px = cursor_screen;
+        });
+        self.pcc.dirty
     }
 
     fn regenerate(&mut self, width: i32, height: i32) {
@@ -357,22 +374,121 @@ impl App {
         self.world.regenerate(Rect::from_xywh(0, 0, width, height));
 
         // reset any app state that depends on the previous "world"
-        self.nav = None;
-        self.pointed_room = None;
-        // self.prior_click = None;
+        self.nav.forget();
+        self.pointed_room.forget();
         self.generate_requested = false;
 
-        // the current cursor position might be pointing to a room in the new world
-        let cursor = &self.cursor.clone();
-        self.update_pointer(Some(cursor), None);
-
         // pick a random position for the player
-        if let Some(graph) = &self.world.floor_graph {
+        let new_player_pos = self.world.floor_graph.as_ref().and_then(|graph| {
             let mut rng = thread_rng();
-            self.player_pos = graph.nodes().choose(&mut rng).map(|n| {
+            graph.nodes().choose(&mut rng).map(|n| {
                 let point = graph.get_bounds(*n.id()).center();
                 [point.x, point.y]
+            }).clone()
+        });
+        if let Some(pos) = new_player_pos {
+            self.pcc.modify(|PccState { player_pos, .. }| {
+                *player_pos = pos;
             });
+        }
+    }
+}
+
+struct PointedRoom {
+    current: Option<FloorNodeId>,
+    last_pointer: Option<Point>
+}
+impl PointedRoom {
+    fn new() -> Self {
+        PointedRoom {
+            current: None,
+            last_pointer: None,
+        }
+    }
+    fn forget(&mut self) {
+        self.current = None;
+        self.last_pointer = None;
+    }
+    fn update(&mut self, pointer: Point, graph: &DungeonFloorGraph) {
+        let should_update = match self.last_pointer {
+            Some(last) => last[0] != pointer[0] || last[1] != pointer[1],
+            None => true,
+        };
+        if should_update {
+            self.current = graph.node_at_point(&pointer).map(|n| n.id()).cloned();
+            self.last_pointer = Some(pointer);
+        }
+    }
+}
+
+struct PccState<'a> {
+    pub cursor_px: &'a mut [f64; 2],
+    pub screen_px: &'a mut [f64; 2],
+    pub player_pos: &'a mut [f64; 2],
+}
+
+struct PlayerCameraCursor {
+    cursor_px: [f64; 2],
+    cursor_pos: [f64; 2],
+    screen_px: [f64; 2],
+    player_pos: [f64; 2],
+    camera: Matrix2d,
+    camera_inv: Matrix2d,
+    dirty: bool,
+}
+impl PlayerCameraCursor {
+    fn new(screen_size: [u32; 2]) -> Self {
+        PlayerCameraCursor {
+            cursor_px: [0.0, 0.0],
+            cursor_pos: [0.0, 0.0],
+            screen_px: [screen_size[0] as f64, screen_size[1] as f64],
+            player_pos: [screen_size[0] as f64 / 2.0, screen_size[1] as f64 / 2.0],
+            camera: identity(),
+            camera_inv: identity(),
+            dirty: true,
+        }
+    }
+
+    fn update(&mut self) {
+        if self.dirty {
+            let zoom_factor = 4.0;
+
+            // this is some kind of voodoo...
+            // for one, the order of operations seems wrong to me
+            // for two, after translating by `-player_pos` without a scale factor,
+            //          you have to apply the scale factor to the half_screen translation??
+            self.camera = identity()
+                .zoom(zoom_factor)
+                .trans_pos(vec2_neg(self.player_pos))
+                .trans_pos(vec2_scale(self.screen_px, 0.5 / zoom_factor));
+
+            self.camera_inv = mat2x3_inv(self.camera);
+
+            self.cursor_pos = row_mat2x3_transform_pos2(self.camera_inv, self.cursor_px);
+
+            self.dirty = false;
+        }
+    }
+
+    fn modify<F>(&mut self, f: F)
+        where F: FnOnce(PccState) -> ()
+    {
+        let [cx1, cy1] = self.cursor_px;
+        let [sx1, sy1] = self.screen_px;
+        let [px1, py1] = self.player_pos;
+
+        f(PccState {
+            cursor_px: &mut self.cursor_px,
+            screen_px: &mut self.screen_px,
+            player_pos: &mut self.player_pos,
+        });
+
+        let [cx2, cy2] = self.cursor_px;
+        let [sx2, sy2] = self.screen_px;
+        let [px2, py2] = self.player_pos;
+
+        if (cx1 != cx2) || (cy1 != cy2) || (sx1 != sx2) || (sy1 != sy2) || (px1 != px2) || (py1 != py2) {
+            self.dirty = true;
         }
     }
 }
@@ -463,7 +579,6 @@ impl World {
         let grid_height = pixel_bounds.height() as usize / self.tile_pixel_size;
         let dungeon = self.generator.generate(grid_width, grid_height);
         self.floor_graph = Some(graph::decompose(&dungeon, self.tile_pixel_size as f64, 2.0, 6.0));
-        // self.floor_graph = Some(graph::decompose(&dungeon, self.tile_pixel_size as f64, 5.0, 20.0));
         self.dungeon = Some(dungeon);
     }
 
