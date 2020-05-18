@@ -1,19 +1,12 @@
-use std::any::Any;
-use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet};
-use std::ops::{Add, Deref, Index};
 
-use graphics::math::Scalar;
 use ncollide2d::bounding_volume::{AABB, BoundingVolume};
 use ncollide2d::math::{Isometry, Point as NaPoint};
 use ncollide2d::partitioning::*;
 use ncollide2d::partitioning::BVH;
 use ncollide2d::query::PointQuery;
-use ncollide2d::query::visitors::PointInterferencesCollector;
-use num::Zero;
 use pathfinding::directed::astar::astar;
-use unordered_pair::UnorderedPair;
-use vecmath::{vec2_len, vec2_sub, Vector2};
+use vecmath::{vec2_len, vec2_sub};
 
 use crate::dungeon::*;
 use crate::geom::Point;
@@ -193,14 +186,14 @@ impl DungeonFloorGraph {
         &self.nodes
     }
 
-    pub fn find_route(&self, from: &Point, to: &Point) -> Option<Vec<Point>> {
+    pub fn find_route(&self, from: &Point, to: &Point, max_steps: u16) -> Option<Vec<(FloorNodeId, Point)>> {
         let start_node = self.node_at_point(from)?;
         let goal_node = self.node_at_point(to)?;
 
         let u = |dist: f64| (dist * 10000f64) as u32;
 
         if start_node.id() == goal_node.id() {
-            return Some(vec![*to]);
+            return Some(vec![(*goal_node.id(), *to)]);
         }
 
         let point_in = |node_id: &FloorNodeId| {
@@ -209,32 +202,39 @@ impl DungeonFloorGraph {
             else { from_na_point(&self.get_bounds(*node_id).center()) }
         };
         let goal_point = point_in(goal_node.id());
+
+        #[derive(Eq, PartialEq, Hash, Clone)]
+        struct SNode(FloorNodeId, u16);
+
         let (path, _total_cost) = astar(
-            start_node.id(),
-            |node_id| {
+            &SNode(*start_node.id(), 0u16),
+            |SNode(node_id, depth)| {
                 let current_center = point_in(node_id);
-                self.adjacencies_of(*node_id).iter().map(move |(neighbor, _gate)| {
-                    let dist = vec2_len(vec2_sub(point_in(neighbor), current_center));
-                    (*neighbor, u(dist))
-                })
+                let current_depth = depth.clone();
+                self.adjacencies_of(*node_id).iter()
+                    .filter(move |_| current_depth < max_steps)
+                    .map(move |(neighbor, _gate)| {
+                        let dist = vec2_len(vec2_sub(point_in(neighbor), current_center));
+                        (SNode(*neighbor, current_depth + 1), u(dist))
+                    })
             },
-            |node_id| {
+            |SNode(node_id, _)| {
                 let current_point = point_in(node_id);
                 let dist = vec2_len(vec2_sub(goal_point, current_point));
                 u(dist)
             },
-            |node_id| node_id == goal_node.id()
+            |SNode(node_id, _)| node_id == goal_node.id()
         )?;
 
         // the path is a Vec whose items are NodeIds...
         // now compute a path of Points by aiming for the middle of each PathGate on the borders between Nodes,
         // and finish off the path with the goal point which is found inside the final Node
-        let mut points: Vec<Point> = Vec::with_capacity(path.len() - 1);
-        for (current, next) in path.iter().sliding() {
+        let mut points: Vec<(FloorNodeId, Point)> = Vec::with_capacity(path.len() - 1);
+        for (current, next) in path.iter().map(|SNode(id, _)| id).sliding() {
             let gate: &PathGate = self.adj[current.0].get(next)?;
-            points.push(gate.center());
+            points.push((*next, gate.center()));
         }
-        points.push(goal_point);
+        points.push((path[path.len() - 1].0, goal_point));
 
         // let points: Vec<_> = path.iter().map(point_in).collect();
         Some(points)

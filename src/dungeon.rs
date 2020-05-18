@@ -1,4 +1,4 @@
-use std::cmp::{max, Ordering};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -7,13 +7,12 @@ use std::num::NonZeroUsize;
 
 use num::clamp;
 use pathfinding::directed::dijkstra::dijkstra;
-use pathfinding::undirected::connected_components::connected_components;
 use rand::{Rng, thread_rng};
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::seq::SliceRandom;
 use unordered_pair::UnorderedPair;
 
-use crate::tile::{CompassDirection, GridTiles, GridWalls, TileAddress, WallAddress, WallType};
+use crate::tile::{GridTiles, GridWalls, TileAddress, WallAddress, WallType};
 
 pub struct GridDungeon<R, W = WallType> {
     grid_width: usize,
@@ -88,7 +87,7 @@ impl RoomSize {
 }
 
 pub trait GridDungeonGenerator<R, W = WallType> {
-    fn generate(&mut self, grid_width: usize, grid_height: usize) -> GridDungeon<R, W>;
+    fn generate(&self, grid_width: usize, grid_height: usize) -> GridDungeon<R, W>;
 }
 
 
@@ -149,7 +148,7 @@ fn random_room_placement<R, F>(
 }
 
 impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenerator {
-    fn generate(&mut self, grid_width: usize, grid_height: usize) -> GridDungeon<Option<(RoomId, f32)>, WallType> {
+    fn generate(&self, grid_width: usize, grid_height: usize) -> GridDungeon<Option<(RoomId, f32)>, WallType> {
         let mut dungeon: GridDungeon<Option<(RoomId, f32)>, WallType> = GridDungeon::new(grid_width, grid_height);
         let mut rng = thread_rng();
         let mut next_room_id: usize = 0;
@@ -325,6 +324,7 @@ fn room_id_at(dungeon: &BasicGridDungeon, tile: TileAddress) -> Option<RoomId> {
 /// Graph representing a series of interconnected points in the [0..1) space.
 /// Meant to be interpreted as relative positions in a GridDungeon to describe
 /// a general layout of main paths.
+#[derive(Clone)]
 pub struct BiasGraph<N> {
     nodes: HashMap<N, (f32, f32)>,
     edges: Vec<(N, N)>,
@@ -373,8 +373,6 @@ impl GridDungeonGraph {
 
             // no room at the address; do a search to find a valid address with room data
             _ => {
-                let x = clamp(target.x, 0, self.dungeon.grid_width() - 1);
-                let y = clamp(target.y, 0, self.dungeon.grid_height() - 1);
                 let path_opt = dijkstra(
                     &TileAddress {
                         x: clamp(target.x, 0, self.dungeon.grid_width() - 1),
@@ -706,7 +704,7 @@ impl GridDungeonGraph {
 
         // collect walls that need to be converted to doors
         let mut doorable_walls: HashMap<RoomIdPair, Vec<WallAddress>> = HashMap::new();
-        for (wall_addr, wall_data) in self.dungeon.walls().iter() {
+        for (wall_addr, _wall_data) in self.dungeon.walls().iter() {
             if let Some(r1) = room_id_at(&self.dungeon, wall_addr.tile()) {
                 if let Some(r2) = wall_addr.neighbor().and_then(|n| room_id_at(&self.dungeon, n)) {
                     let edge = UnorderedPair(r1, r2);
@@ -728,13 +726,14 @@ impl GridDungeonGraph {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum GeneratorStep {
     Branches { count: u32 },
     Widen { iterations: u32 },
     Clusters { count: u32, iterations: u32 }
 }
 
+#[derive(Clone)]
 pub struct GeneratorStrategy<ID> {
     pub room_chances: Vec<(RoomSize, u32)>,
     pub bias_graph: BiasGraph<ID>,
@@ -756,7 +755,7 @@ impl <ID: Eq + Hash + Copy> GeneratorStrategy<ID> {
             }
         }).collect();
 
-        let mut base_generator = RandomRoomGridDungeonGenerator::new(permuted_room_chances);
+        let base_generator = RandomRoomGridDungeonGenerator::new(permuted_room_chances);
         let grid = base_generator.generate(grid_width, grid_height);
         let mut graph = GridDungeonGraph::from(grid);
 

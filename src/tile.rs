@@ -2,7 +2,6 @@ use std::borrow::{Borrow, BorrowMut};
 use std::cmp::Eq;
 use std::convert::TryFrom;
 use std::iter::Enumerate;
-use std::marker::PhantomData;
 use std::ops::{Add, Index, IndexMut};
 use std::slice::{Iter, IterMut};
 
