@@ -1,6 +1,4 @@
-use std::borrow::{Borrow, BorrowMut};
 use std::cmp::Eq;
-use std::convert::TryFrom;
 use std::iter::Enumerate;
 use std::ops::{Add, Index, IndexMut};
 use std::slice::{Iter, IterMut};
@@ -18,6 +16,7 @@ pub enum CompassDirection {
     South,
     West,
 }
+
 impl CompassDirection {
     pub fn reflect(&self) -> CompassDirection {
         match *self {
@@ -42,14 +41,14 @@ impl Add<CompassDirection> for TileAddress {
                 } else {
                     None
                 }
-            },
+            }
             CompassDirection::West => {
                 if self.x > 0 {
                     Some(TileAddress { x: self.x - 1, y: self.y })
                 } else {
                     None
                 }
-            },
+            }
         }
     }
 }
@@ -58,8 +57,9 @@ impl Add<CompassDirection> for TileAddress {
 pub enum WallType {
     Clear,
     Wall,
-    Door
+    Door,
 }
+
 impl Default for WallType {
     fn default() -> Self {
         WallType::Clear
@@ -97,7 +97,7 @@ impl WallAddress {
                     // west walls of non-edge tiles are treated as the east wall of the western neighbor
                     WallAddress {
                         tile: TileAddress { x: x - 1, y },
-                        direction: CompassDirection::East
+                        direction: CompassDirection::East,
                     }
                 } else {
                     // west walls of edge tiles at x=y are not changed
@@ -116,6 +116,7 @@ impl WallAddress {
         self.direction
     }
 }
+
 impl From<(TileAddress, CompassDirection)> for WallAddress {
     fn from((tile, direction): (TileAddress, CompassDirection)) -> Self {
         WallAddress::new(tile, direction)
@@ -125,16 +126,17 @@ impl From<(TileAddress, CompassDirection)> for WallAddress {
 pub struct GridTiles<T> {
     grid_width: usize,
     grid_height: usize,
-    tiles_data: Vec<T>
+    tiles_data: Vec<T>,
 }
-impl <T: Default + Clone> GridTiles<T> {
+
+impl<T: Default + Clone> GridTiles<T> {
     pub fn new(grid_width: usize, grid_height: usize) -> Self {
         let tiles_data = vec![Default::default(); grid_width * grid_height];
         GridTiles { grid_width, grid_height, tiles_data }
     }
-
 }
-impl <T> GridTiles<T> {
+
+impl<T> GridTiles<T> {
     pub fn has_tile(&self, address: &TileAddress) -> bool {
         address.x < self.grid_width && address.y < self.grid_height
     }
@@ -153,7 +155,7 @@ impl <T> GridTiles<T> {
     pub fn iter_mut(&mut self) -> GridTilesIterMut<T> {
         GridTilesIterMut {
             grid_width: self.grid_width,
-            inner: self.tiles_data.iter_mut().enumerate()
+            inner: self.tiles_data.iter_mut().enumerate(),
         }
     }
     pub fn get(&self, index: TileAddress) -> Option<&T> {
@@ -173,7 +175,8 @@ impl <T> GridTiles<T> {
         }
     }
 }
-impl <T> Index<TileAddress> for GridTiles<T> {
+
+impl<T> Index<TileAddress> for GridTiles<T> {
     type Output = T;
 
     fn index(&self, index: TileAddress) -> &Self::Output {
@@ -181,7 +184,8 @@ impl <T> Index<TileAddress> for GridTiles<T> {
         &self.tiles_data[i]
     }
 }
-impl <T> IndexMut<TileAddress> for GridTiles<T> {
+
+impl<T> IndexMut<TileAddress> for GridTiles<T> {
     fn index_mut(&mut self, index: TileAddress) -> &mut Self::Output {
         let i = index.x + (index.y * self.grid_width);
         &mut self.tiles_data[i]
@@ -192,7 +196,8 @@ pub struct GridTilesAddresses<'a, T> {
     parent: &'a GridTiles<T>,
     i: usize,
 }
-impl <'a, T> Iterator for GridTilesAddresses<'a, T> {
+
+impl<'a, T> Iterator for GridTilesAddresses<'a, T> {
     type Item = TileAddress;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -203,16 +208,17 @@ impl <'a, T> Iterator for GridTilesAddresses<'a, T> {
         } else {
             let x = self.i % w;
             self.i += 1;
-            Some(TileAddress{ x, y })
+            Some(TileAddress { x, y })
         }
     }
 }
 
 pub struct GridTilesIter<'a, T> {
     grid_width: usize,
-    inner: Enumerate<Iter<'a, T>>
+    inner: Enumerate<Iter<'a, T>>,
 }
-impl <'a, T> Iterator for GridTilesIter<'a, T> {
+
+impl<'a, T> Iterator for GridTilesIter<'a, T> {
     type Item = (TileAddress, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -223,11 +229,13 @@ impl <'a, T> Iterator for GridTilesIter<'a, T> {
         })
     }
 }
+
 pub struct GridTilesIterMut<'a, T> {
     grid_width: usize,
-    inner: Enumerate<IterMut<'a, T>>
+    inner: Enumerate<IterMut<'a, T>>,
 }
-impl <'a, T> Iterator for GridTilesIterMut<'a, T> {
+
+impl<'a, T> Iterator for GridTilesIterMut<'a, T> {
     type Item = (TileAddress, &'a mut T);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -260,6 +268,7 @@ impl<T: Default + Clone> GridWalls<T> {
         }
     }
 }
+
 impl<T> GridWalls<T> {
     pub fn iter(&self) -> GridWallsIterator<T> {
         GridWallsIterator {
@@ -270,7 +279,7 @@ impl<T> GridWalls<T> {
                 self.east_walls.iter().enumerate(),
                 self.south_walls.iter().enumerate(),
                 self.west_walls.iter().enumerate()
-            ]
+            ],
         }
     }
     pub fn iter_mut(&mut self) -> GridWallsIteratorMut<T> {
@@ -282,7 +291,7 @@ impl<T> GridWalls<T> {
                 self.east_walls.iter_mut().enumerate(),
                 self.south_walls.iter_mut().enumerate(),
                 self.west_walls.iter_mut().enumerate()
-            ]
+            ],
         }
     }
 }
@@ -292,7 +301,7 @@ impl<T> Index<WallAddress> for GridWalls<T> {
 
     fn index(&self, index: WallAddress) -> &Self::Output {
         let TileAddress { x, y } = index.tile;
-        if x >= self.grid_width || y >= self.grid_height { panic!("WallAddress out of bounds for grid ({},{}) vs ({}, {})", x,y, self.grid_width, self.grid_height) }
+        if x >= self.grid_width || y >= self.grid_height { panic!("WallAddress out of bounds for grid ({},{}) vs ({}, {})", x, y, self.grid_width, self.grid_height) }
         match index.direction {
             CompassDirection::North => &self.north_walls[x + y * self.grid_width],
             CompassDirection::East => &self.east_walls[x + y * self.grid_width],
@@ -309,14 +318,14 @@ impl<T> IndexMut<WallAddress> for GridWalls<T> {
             CompassDirection::North => {
                 let i = x + y * self.grid_width;
                 &mut self.north_walls[i]
-            },
+            }
             CompassDirection::East => {
                 let i = x + y * self.grid_width;
                 &mut self.east_walls[i]
-            },
+            }
             CompassDirection::South => {
                 &mut self.south_walls[x]
-            },
+            }
             CompassDirection::West => {
                 &mut self.west_walls[y]
             }
@@ -324,7 +333,7 @@ impl<T> IndexMut<WallAddress> for GridWalls<T> {
     }
 }
 
-impl <'a, T> IntoIterator for &'a GridWalls<T> {
+impl<'a, T> IntoIterator for &'a GridWalls<T> {
     type Item = (WallAddress, &'a T);
     type IntoIter = GridWallsIterator<'a, T>;
 
@@ -341,38 +350,39 @@ fn wall_addr_from_grid_index(index: usize, direction: CompassDirection, grid_wid
                     x: index % grid_width,
                     y: index / grid_width,
                 },
-                CompassDirection::North
+                CompassDirection::North,
             )
-        },
+        }
         CompassDirection::East => {
             WallAddress::new(
                 TileAddress {
                     x: index % grid_width,
                     y: index / grid_width,
                 },
-                CompassDirection::East
+                CompassDirection::East,
             )
-        },
+        }
         CompassDirection::South => {
             WallAddress::new(
                 TileAddress {
                     x: index,
-                    y: 0
+                    y: 0,
                 },
-                CompassDirection::South
+                CompassDirection::South,
             )
-        },
+        }
         CompassDirection::West => {
             WallAddress::new(
                 TileAddress {
                     x: 0,
                     y: index,
                 },
-                CompassDirection::West
+                CompassDirection::West,
             )
         }
     }
 }
+
 fn next_direction(current: CompassDirection) -> Option<CompassDirection> {
     match current {
         CompassDirection::North => Some(CompassDirection::East),
@@ -387,7 +397,8 @@ pub struct GridWallsIterator<'a, T> {
     wall_iters: [Enumerate<Iter<'a, T>>; 4],
     direction: Option<CompassDirection>,
 }
-impl <'a, T> Iterator for GridWallsIterator<'a, T> {
+
+impl<'a, T> Iterator for GridWallsIterator<'a, T> {
     type Item = (WallAddress, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -416,7 +427,7 @@ pub struct GridWallsIteratorMut<'a, T> {
     direction: Option<CompassDirection>,
 }
 
-impl <'a, T> Iterator for GridWallsIteratorMut<'a, T> {
+impl<'a, T> Iterator for GridWallsIteratorMut<'a, T> {
     type Item = (WallAddress, &'a mut T);
 
     fn next(&mut self) -> Option<Self::Item> {

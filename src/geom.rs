@@ -1,14 +1,9 @@
 use std::cmp::{max, Ordering};
 
+use parry2d::math::{Point as NaPoint, Real};
 use rand::Rng;
-use vecmath;
 
-pub type Point = vecmath::Vector2<f64>;
-pub type Pixel = vecmath::Vector2<u32>;
-
-pub fn point_eq<T: PartialEq>(l: &vecmath::Vector2<T>, r: &vecmath::Vector2<T>) -> bool {
-    l[0] == r[0] && l[1] == r[1]
-}
+pub type Point = NaPoint<Real>;
 
 pub struct Corners<T>(pub (T, T), pub (T, T));
 
@@ -19,6 +14,7 @@ pub struct Rect {
     y_min: i32,
     y_max: i32,
 }
+
 impl Rect {
     pub fn from_xywh(x: i32, y: i32, w: i32, h: i32) -> Rect {
         Rect {
@@ -47,11 +43,11 @@ impl Rect {
         let x_stops = vec![self.x_min, hole.x_min, hole.x_max, self.x_max];
         let y_stops = vec![self.y_max, hole.y_max, hole.y_min, self.y_min];
 
-        for (i,j) in stop_indexes {
+        for (i, j) in stop_indexes {
             let x_min = x_stops[i];
-            let x_max = x_stops[i+1];
+            let x_max = x_stops[i + 1];
             let y_max = y_stops[j];
-            let y_min = y_stops[j+1];
+            let y_min = y_stops[j + 1];
 
             if x_min < x_max && y_min < y_max {
                 tiles.push(Corners((x_min, y_min), (x_max, y_max)).into());
@@ -61,7 +57,8 @@ impl Rect {
         RectSliceAway(tiles)
     }
 }
-impl <T> From<Corners<T>> for Rect
+
+impl<T> From<Corners<T>> for Rect
     where T: Into<i32>
 {
     fn from(corners: Corners<T>) -> Self {
@@ -73,13 +70,14 @@ impl <T> From<Corners<T>> for Rect
 }
 
 pub struct RectSliceAway(Vec<Rect>);
+
 impl RectSliceAway {
     pub fn random_stitch<R: Rng>(self, rng: &mut R) -> Vec<Rect> {
         let mut pending = self.0;
         let mut out: Vec<Rect> = Vec::new();
         while !pending.is_empty() {
             // pick a random index in the vector and check if the tiles at neighboring indexes are adjacent
-            let i = rng.gen_range(0, pending.len());
+            let i = rng.gen_range(0..pending.len());
 
             let can_weld_forward = check_weldability(i, &pending, true);
             let can_weld_backward = check_weldability(i, &pending, false);
@@ -109,6 +107,7 @@ fn check_weldability(current: usize, vec: &Vec<Rect>, forward: bool) -> bool {
     }
     return false;
 }
+
 fn do_welds(current: usize, vec: Vec<Rect>, forward: bool) -> (Vec<Rect>, Rect) {
     let mut drain = VecDrain { vec, current, forward };
     let mut out = drain.take_current().unwrap();
@@ -122,7 +121,7 @@ fn do_welds(current: usize, vec: Vec<Rect>, forward: bool) -> (Vec<Rect>, Rect) 
                 } else {
                     break;
                 }
-            },
+            }
         }
     }
     (drain.restore(), out)
@@ -149,7 +148,7 @@ struct VecDrain<T> {
     forward: bool,
 }
 
-impl <T> VecDrain<T>
+impl<T> VecDrain<T>
 {
     fn restore(self) -> Vec<T> {
         self.vec
@@ -195,6 +194,7 @@ fn weld(a: &Rect, b: &Rect) -> Option<Rect> {
         })
     })
 }
+
 fn weld_h(left: &Rect, right: &Rect) -> Option<Rect> {
     // same height, same y pos, and the X min/max are touching
     if (left.height() == right.height()) && (left.y_max() == right.y_max()) && (left.x_max() == right.x_min()) {
@@ -203,6 +203,7 @@ fn weld_h(left: &Rect, right: &Rect) -> Option<Rect> {
         None
     }
 }
+
 fn weld_v(top: &Rect, bottom: &Rect) -> Option<Rect> {
     if (top.width() == bottom.width()) && (top.x_min() == bottom.x_min()) && (top.y_min() == bottom.y_max()) {
         Some(Corners(top.upper_right(), bottom.lower_left()).into())

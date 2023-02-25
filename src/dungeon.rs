@@ -1,11 +1,10 @@
-use std::cmp::Ordering;
+use std::cmp::Ord;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::iter::Iterator;
 use std::num::NonZeroUsize;
 
-use num::clamp;
 use pathfinding::directed::dijkstra::dijkstra;
 use rand::{Rng, thread_rng};
 use rand::distributions::{Distribution, WeightedIndex};
@@ -26,7 +25,7 @@ impl<R, W> GridDungeon<R, W>
         R: Default + Clone,
         W: Default + Clone,
 {
-    fn new(grid_width: usize, grid_height: usize) -> Self {
+    pub fn new(grid_width: usize, grid_height: usize) -> Self {
         GridDungeon {
             grid_width,
             grid_height,
@@ -95,7 +94,7 @@ pub trait GridDungeonGenerator<R, W = WallType> {
 pub struct RoomId(usize);
 
 pub struct RandomRoomGridDungeonGenerator {
-    room_chances: Vec<(RoomSize, u32)>
+    room_chances: Vec<(RoomSize, u32)>,
 }
 
 impl RandomRoomGridDungeonGenerator {
@@ -156,7 +155,7 @@ impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenera
 
         // fill the grid with rooms
         while !unassigned_tiles.is_empty() {
-            let target_tile = unassigned_tiles[rng.gen_range(0, unassigned_tiles.len())];
+            let target_tile = unassigned_tiles[rng.gen_range(0..unassigned_tiles.len())];
             let maybe_placed = random_room_placement(
                 &target_tile,
                 &self.room_chances,
@@ -359,8 +358,6 @@ impl<'a, N: 'a + Copy + Eq + Hash> BiasGraph<N> {
     }
 }
 
-type GraphError = (&'static str, GridDungeonGraph);
-
 impl GridDungeonGraph {
     pub fn take(self) -> BasicGridDungeon {
         self.dungeon
@@ -375,8 +372,8 @@ impl GridDungeonGraph {
             _ => {
                 let path_opt = dijkstra(
                     &TileAddress {
-                        x: clamp(target.x, 0, self.dungeon.grid_width() - 1),
-                        y: clamp(target.y, 0, self.dungeon.grid_height() - 1),
+                        x: target.x.clamp(0, self.dungeon.grid_width() - 1),
+                        y: target.y.clamp(0, self.dungeon.grid_height() - 1),
                     },
                     |&TileAddress { x, y }| {
                         let x_1: Option<usize> = x.checked_sub(1);
@@ -515,8 +512,8 @@ impl GridDungeonGraph {
             remaining_attempts -= 1;
 
             // pick a random position, and whatever room is there is our target
-            let x = rng.gen_range(0, self.dungeon.grid_width());
-            let y = rng.gen_range(0, self.dungeon.grid_height());
+            let x = rng.gen_range(0..self.dungeon.grid_width());
+            let y = rng.gen_range(0..self.dungeon.grid_height());
             if let Some(target_room) = room_id_at(&self.dungeon, TileAddress { x, y }) {
                 // avoid target rooms that are already connected
                 if !connected.contains(&target_room) {
@@ -582,7 +579,7 @@ impl GridDungeonGraph {
         while iterations > 0 && !frontier.is_empty() {
             iterations -= 1;
 
-            let advance_index = rng.gen_range(0, frontier.len());
+            let advance_index = rng.gen_range(0..frontier.len());
             let advance_from = frontier[advance_index];
             let (neighbors, weights): (Vec<RoomId>, Vec<f32>) = self.adjacency[&advance_from].iter().cloned()
                 .filter(|n_id| {
@@ -643,7 +640,7 @@ impl GridDungeonGraph {
             iterations -= 1;
 
             // pick a random unconnected neighbor that is adjacent to the 'frontier', and connect it
-            let f_index = rng.gen_range(0, frontier.len());
+            let f_index = rng.gen_range(0..frontier.len());
             let room_id = frontier[f_index];
             let unconnected_neighbors: Vec<RoomId> = self.adjacency[&room_id].iter().cloned().filter(|neighbor_id| {
                 let edge = UnorderedPair(room_id, *neighbor_id);
@@ -720,7 +717,7 @@ impl GridDungeonGraph {
         // knock down a random wall for each inter-room edge
         let mut rng = thread_rng();
         for (_, walls) in doorable_walls {
-            let wall = walls[rng.gen_range(0, walls.len())];
+            let wall = walls[rng.gen_range(0..walls.len())];
             self.dungeon.walls[wall] = WallType::Door;
         }
     }
@@ -730,16 +727,17 @@ impl GridDungeonGraph {
 pub enum GeneratorStep {
     Branches { count: u32 },
     Widen { iterations: u32 },
-    Clusters { count: u32, iterations: u32 }
+    Clusters { count: u32, iterations: u32 },
 }
 
 #[derive(Clone)]
 pub struct GeneratorStrategy<ID> {
     pub room_chances: Vec<(RoomSize, u32)>,
     pub bias_graph: BiasGraph<ID>,
-    pub steps: Vec<GeneratorStep>
+    pub steps: Vec<GeneratorStep>,
 }
-impl <ID: Eq + Hash + Copy> GeneratorStrategy<ID> {
+
+impl<ID: Eq + Hash + Copy> GeneratorStrategy<ID> {
     pub fn generate(&self, grid_width: usize, grid_height: usize) -> BasicGridDungeon {
         let permuted_room_chances = self.room_chances.iter().flat_map(|&(size, chance)| {
             let RoomSize(w, h) = size;
