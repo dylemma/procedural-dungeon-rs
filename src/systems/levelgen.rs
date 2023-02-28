@@ -1,7 +1,7 @@
 use std::ops::DerefMut;
 use bevy::prelude::*;
 use crate::dungeon::*;
-use crate::graph::{decompose, DungeonFloorGraph};
+use crate::graph::{decompose, DungeonFloorGraph, FloorNode};
 use crate::nav::Navigation;
 use crate::WorldParams;
 use rand::{seq::SliceRandom, thread_rng};
@@ -51,7 +51,12 @@ fn generate_layout(
         // layout.dungeon = dungeon;
         // layout.floor_graph = floor_graph;
 
-        let nodes = layout.floor_graph.nodes();
+        let nodes: Vec<&FloorNode> = layout.floor_graph.nodes().iter().filter(|&node| {
+            match node {
+                FloorNode::Room { room_state, .. } => room_state.weight().is_none(),
+                _ => true,
+            }
+        }).collect();
         let mut rng = thread_rng();
         for (mut navigator, mut transform) in navigators_to_reset.iter_mut() {
             // pick a random room
@@ -134,8 +139,8 @@ impl Default for LayoutStrategy {
             ),
             steps: vec![
                 GeneratorStep::Branches { count: 15 },
-                GeneratorStep::Clusters { count: 10, iterations: 50 },
-                GeneratorStep::Widen { iterations: 150 },
+                GeneratorStep::Clusters { count: 10, iterations: 500 },
+                GeneratorStep::Widen { iterations: 500 },
             ]
         };
         LayoutStrategy {

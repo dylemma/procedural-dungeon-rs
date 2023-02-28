@@ -23,8 +23,12 @@ pub fn decompose(dungeon: &BasicGridDungeon, tile_size: Real, wall_margin: Real,
 
     let mut graph = DungeonFloorGraph::new();
 
-    let room_tiles_itr = dungeon.tiles().iter().filter(|(_, data)| data.is_some()).map(|(tile, _)| tile);
-    for tile in room_tiles_itr {
+    let room_tiles_itr = dungeon
+        .tiles()
+        .iter()
+        .flat_map(|(tile_addr, data_opt)| data_opt.map(|(_, room_state)| (tile_addr, room_state)))
+        ;
+    for (tile, room_state) in room_tiles_itr {
         if !seen_tiles.contains(&tile) {
             if let Some((room_id, southwest, northeast)) = find_corners(dungeon, &tile) {
                 // a room is defined here, by its corners at southwest and northeast
@@ -39,6 +43,7 @@ pub fn decompose(dungeon: &BasicGridDungeon, tile_size: Real, wall_margin: Real,
                     FloorNode::Room {
                         id,
                         room_id,
+                        room_state,
                         grid_corners: [southwest, northeast],
                         world_bounds: aabb,
                     }
@@ -97,6 +102,7 @@ pub enum FloorNode {
     Room {
         id: FloorNodeId,
         room_id: RoomId,
+        room_state: RoomState,
         grid_corners: [TileAddress; 2],
         // bvid: DBVTLeafId,
         world_bounds: Aabb,

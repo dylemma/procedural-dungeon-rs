@@ -3,6 +3,7 @@ use bevy::render::camera::{ScalingMode, WindowOrigin};
 use bevy::sprite::Anchor;
 
 use crate::convert::*;
+use crate::dungeon::{GeneratorStep, RoomState};
 use crate::graph::FloorNode;
 use crate::systems::levelgen::Layout;
 use crate::WorldParams;
@@ -59,7 +60,15 @@ pub fn room_sprites(
         let mut spawn_count = 0u32;
         for node in layout.floor_graph.nodes().iter() {
             let color = match node {
-                FloorNode::Room { .. } => Color::CYAN,
+                FloorNode::Room { room_state, .. } => match room_state {
+                    //Color::CYAN,
+                    RoomState::Seed => Color::CYAN,
+                    RoomState::BiasPath => Color::WHITE,
+                    RoomState::ConnectedBy { step: GeneratorStep::Branches { .. }} => Color::ANTIQUE_WHITE,
+                    RoomState::ConnectedBy { step: GeneratorStep::Clusters { .. }} => Color::BEIGE,
+                    RoomState::ConnectedBy { step: GeneratorStep::Widen { .. }} => Color::BISQUE,
+                    RoomState::Pending { weight } => Color::YELLOW_GREEN * [*weight; 3],
+                }
                 FloorNode::Door { .. } => Color::ALICE_BLUE,
             };
             let size: Vec2 = vector_to_vec2(node.world_bounds().extents());

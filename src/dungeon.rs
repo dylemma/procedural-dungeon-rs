@@ -93,6 +93,49 @@ pub trait GridDungeonGenerator<R, W = WallType> {
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug)]
 pub struct RoomId(usize);
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum RoomState {
+    Seed,
+    BiasPath,
+    ConnectedBy { step: GeneratorStep },
+    Pending { weight: f32 },
+}
+
+impl RoomState {
+    /// If this RoomState is pending and the `other_weight` is higher
+    /// than the current weight, update the room's weight to `other_weight`.
+    fn saturate_pending(&mut self, other_weight: f32) {
+        match self {
+            RoomState::Pending { weight } => {
+                *weight = weight.max(other_weight);
+            }
+            _ => {}
+        }
+    }
+
+    fn weight_for_dijkstra(&self) -> i32 {
+        // f32 doesn't have an Ord, so we'll map the [0.0, 1.0) range to [0, 256) for cost calculations
+        match self {
+            RoomState::Pending { weight } => (weight * 256.) as i32,
+            _ => 128,
+        }
+    }
+
+    pub(crate) fn weight(&self) -> Option<f32> {
+        match self {
+            RoomState::Pending { weight } => Some(*weight),
+            _ => None,
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        match self {
+            RoomState::Pending { .. } => false,
+            _ => true
+        }
+    }
+}
+
 pub struct RandomRoomGridDungeonGenerator {
     room_chances: Vec<(RoomSize, u32)>,
 }
@@ -146,9 +189,9 @@ fn random_room_placement<R, F>(
     }
 }
 
-impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenerator {
-    fn generate(&self, grid_width: usize, grid_height: usize) -> GridDungeon<Option<(RoomId, f32)>, WallType> {
-        let mut dungeon: GridDungeon<Option<(RoomId, f32)>, WallType> = GridDungeon::new(grid_width, grid_height);
+impl GridDungeonGenerator<Option<(RoomId, RoomState)>> for RandomRoomGridDungeonGenerator {
+    fn generate(&self, grid_width: usize, grid_height: usize) -> GridDungeon<Option<(RoomId, RoomState)>, WallType> {
+        let mut dungeon: GridDungeon<Option<(RoomId, RoomState)>, WallType> = GridDungeon::new(grid_width, grid_height);
         let mut rng = thread_rng();
         let mut next_room_id: usize = 0;
         let mut unassigned_tiles: Vec<TileAddress> = dungeon.tiles().tile_addresses().collect();
@@ -174,7 +217,7 @@ impl GridDungeonGenerator<Option<(RoomId, f32)>> for RandomRoomGridDungeonGenera
                 // assign tiles on the grid
                 let room_id = RoomId(next_room_id);
                 next_room_id += 1;
-                let room_weight: f32 = rng.gen();
+                let room_weight = RoomState::Pending { weight: rng.gen() };
                 for x in room_x..(room_x + room_w) {
                     for y in room_y..(room_y + room_h) {
                         let addr = TileAddress { x, y };
@@ -254,7 +297,7 @@ impl<I, T> Iterator for SlidingIter<I, T>
     }
 }
 
-pub type BasicGridDungeon = GridDungeon<Option<(RoomId, f32)>>;
+pub type BasicGridDungeon = GridDungeon<Option<(RoomId, RoomState)>>;
 type RoomIdPair = UnorderedPair<RoomId>;
 
 #[derive(Eq, PartialEq)]
@@ -266,7 +309,7 @@ enum EdgeState {
 // TODO: eventually make this a non-public implementation detail of the generator
 pub struct GridDungeonGraph {
     dungeon: BasicGridDungeon,
-    rooms: HashMap<RoomId, (TileAddress, f32)>,
+    rooms: HashMap<RoomId, (TileAddress, RoomState)>,
     adjacency: HashMap<RoomId, HashSet<RoomId>>,
     edge_data: HashMap<RoomIdPair, EdgeState>,
 }
@@ -274,19 +317,17 @@ pub struct GridDungeonGraph {
 impl From<BasicGridDungeon> for GridDungeonGraph {
     fn from(dungeon: BasicGridDungeon) -> Self {
         // create an index lookup for room weights and southwest corners
-        let mut rooms: HashMap<RoomId, (TileAddress, f32)> = HashMap::new();
+        let mut rooms: HashMap<RoomId, (TileAddress, RoomState)> = HashMap::new();
         dungeon.tiles().iter().for_each(|(addr, tile_data)| {
-            if let Some((id, weight)) = tile_data {
+            if let Some((id, RoomState::Pending { weight })) = tile_data {
                 rooms.entry(*id)
                     .and_modify(|(prev_addr, prev_weight)| {
                         if addr.x < prev_addr.x || addr.y < prev_addr.y {
                             *prev_addr = addr;
                         }
-                        if weight > prev_weight {
-                            *prev_weight = *weight;
-                        }
+                        prev_weight.saturate_pending(*weight);
                     })
-                    .or_insert((addr, *weight));
+                    .or_insert((addr, RoomState::Pending { weight: *weight }));
             }
         });
 
@@ -363,7 +404,7 @@ impl GridDungeonGraph {
         self.dungeon
     }
 
-    pub fn find_nearest_room(&self, target: &TileAddress) -> &(RoomId, f32) {
+    pub fn find_nearest_room(&self, target: &TileAddress) -> &(RoomId, RoomState) {
         match self.dungeon.tiles.get(*target) {
             // happy path: the dungeon has a room at the target address
             Some(Some(data)) => data,
@@ -422,8 +463,7 @@ impl GridDungeonGraph {
                         .get(current_room).into_iter()
                         .flat_map(|neighbors| {
                             neighbors.iter().map(|neighbor_id| {
-                                // f32 doesn't have an Ord, so we'll map the [0.0, 1.0) range to [0, 256) for cost calculations
-                                let cost = (self.rooms[neighbor_id].1 * 256.0) as i32;
+                                let cost = self.rooms[neighbor_id].1.weight_for_dijkstra();
                                 (*neighbor_id, cost)
                             })
                         })
@@ -433,8 +473,12 @@ impl GridDungeonGraph {
 
             if let Some((path, _path_cost)) = path_opt {
                 for room in path.iter() {
-                    self.set_room_weight(room, 2.0);
+                    self.set_room_state(room, RoomState::BiasPath);
                 }
+
+                self.set_room_state(&start_room, RoomState::Seed);
+                self.set_room_state(&goal_room, RoomState::Seed);
+
                 for (a, b) in path.iter().sliding() {
                     self.edge_data.insert(UnorderedPair(*a, *b), EdgeState::Connected);
                 }
@@ -480,6 +524,10 @@ impl GridDungeonGraph {
     }
 
     pub fn random_branching_grow(&mut self, num_endpoints: u32) {
+        let connected_state = RoomState::ConnectedBy {
+            step: GeneratorStep::Branches { count: num_endpoints }
+        };
+
         // identify the "main path" of pre-connected rooms
         let preconnected: HashSet<RoomId> = self.edge_data.iter()
             .flat_map(|(rooms, edge_state)| {
@@ -523,7 +571,7 @@ impl GridDungeonGraph {
                         &search_start,
                         |room| {
                             self.adjacency[room].iter().map(|neighbor| {
-                                let cost = if preconnected.contains(neighbor) { 0 } else { (self.rooms[neighbor].1 * 256.0) as i32 };
+                                let cost = if preconnected.contains(neighbor) { 0 } else { self.rooms[neighbor].1.weight_for_dijkstra() };
                                 (*neighbor, cost)
                             })
                         },
@@ -536,7 +584,7 @@ impl GridDungeonGraph {
                         // mark all rooms along the path as connected
                         path.iter().for_each(|room| {
                             if connected.insert(*room) {
-                                self.set_room_weight(&room, 1.2);
+                                self.set_room_state(&room, connected_state);
                             }
                         });
 
@@ -551,6 +599,13 @@ impl GridDungeonGraph {
     }
 
     pub fn dfs_grow_path(&mut self, num_seeds: u32, mut iterations: u32) {
+        let connected_state = RoomState::ConnectedBy {
+            step: GeneratorStep::Clusters {
+                count: num_seeds,
+                iterations,
+            }
+        };
+
         // create a vector of the rooms that are "connected" via an EdgeState::Connected edge touching them.
         // avoid adding duplicate entries to the `frontier` by also tracking `seen` rooms
         let mut connected = HashSet::new();
@@ -589,7 +644,7 @@ impl GridDungeonGraph {
                 .map(|n_id| {
                     // we want to favor lower-cost rooms in our choice of neighbor,
                     // which means inverting the weight for WeightedIndex distribution purposes
-                    let weight = f32::max(0.0, 1.0 - self.rooms[&n_id].1);
+                    let weight = f32::max(0.0, 1.0 - self.rooms[&n_id].1.weight().unwrap_or(0.5));
                     (n_id, weight)
                 })
                 .unzip();
@@ -601,7 +656,7 @@ impl GridDungeonGraph {
                     frontier.push(advance_to);
                 }
                 // mark the added room with a special "weight" to make it render white
-                self.set_room_weight(&advance_to, 1.4);
+                self.set_room_state(&advance_to, connected_state);
             }
 
             // update the frontier (don't try to be fancy by only removing the `room_id` and the `neighbor`,
@@ -613,6 +668,10 @@ impl GridDungeonGraph {
     }
 
     pub fn bfs_grow_path(&mut self, mut iterations: u32) {
+        let connected_state = RoomState::ConnectedBy {
+            step: GeneratorStep::Widen { iterations }
+        };
+
         // create a vector of the rooms that are "connected" via an EdgeState::Connected edge touching them.
         // avoid adding duplicate entries to the `frontier` by also tracking `seen` rooms
         let mut seen = HashSet::new();
@@ -651,7 +710,7 @@ impl GridDungeonGraph {
             self.edge_data.insert(UnorderedPair(room_id, *neighbor), EdgeState::Connected);
 
             // mark the added room with a special "weight" to make it render white
-            self.set_room_weight(neighbor, 1.6);
+            self.set_room_state(neighbor, connected_state);
 
             // add the neighbor to the frontier (it'll just be removed next if it is surrounded)
             if seen.insert(*neighbor) {
@@ -669,8 +728,7 @@ impl GridDungeonGraph {
     /// Sets the weight of all tiles in the given room.
     /// Really this is used for debugging+rendering purposes,
     /// since the main display loop will pick a color based on the weight of each room.
-    pub fn set_room_weight(&mut self, room: &RoomId, weight: f32) {
-        self.rooms.entry(*room).and_modify(|(_, w)| *w = 2.0);
+    pub fn set_room_state(&mut self, room: &RoomId, weight: RoomState) {
 
         if let Some(room_addr) = self.rooms.get(room).map(|(addr, _)| *addr) {
             // the `rooms` index is initialized with the lower-left corners, so we need to identify the upper-right corner
@@ -723,7 +781,7 @@ impl GridDungeonGraph {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum GeneratorStep {
     Branches { count: u32 },
     Widen { iterations: u32 },
