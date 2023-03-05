@@ -6,7 +6,7 @@ mod convert;
 mod dungeon;
 mod geom;
 mod graph;
-mod lib;
+mod util;
 mod nav;
 mod tile;
 mod systems;
