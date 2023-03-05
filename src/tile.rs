@@ -18,12 +18,37 @@ pub enum CompassDirection {
 }
 
 impl CompassDirection {
+    pub const ALL: [CompassDirection; 4] = [
+        CompassDirection::North,
+        CompassDirection::East,
+        CompassDirection::South,
+        CompassDirection::West,
+    ];
+
     pub fn reflect(&self) -> CompassDirection {
         match *self {
             CompassDirection::North => CompassDirection::South,
             CompassDirection::South => CompassDirection::North,
             CompassDirection::East => CompassDirection::West,
             CompassDirection::West => CompassDirection::East,
+        }
+    }
+
+    pub fn rotate_clockwise(&self) -> CompassDirection {
+        match *self {
+            CompassDirection::North => CompassDirection::East,
+            CompassDirection::East => CompassDirection::South,
+            CompassDirection::South => CompassDirection::West,
+            CompassDirection::West => CompassDirection::North,
+        }
+    }
+
+    pub fn rotate_counterclockwise(&self) -> CompassDirection {
+        match *self {
+            CompassDirection::North => CompassDirection::West,
+            CompassDirection::West => CompassDirection::South,
+            CompassDirection::South => CompassDirection::East,
+            CompassDirection::East => CompassDirection::North,
         }
     }
 }
